@@ -35,7 +35,7 @@ import (
 
 	"google.golang.org/protobuf/encoding/protowire"
 
-	"github.com/Yeadear/qqdump/internal/cipher"
+	"github.com/Yeadear/qqdump/cipher"
 )
 
 // DefaultDBName 是 QQ NT 消息库的约定文件名。

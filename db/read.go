@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/Yeadear/qqdump/internal/model"
-	"github.com/Yeadear/qqdump/internal/msgproto"
+	"github.com/Yeadear/qqdump/model"
+	"github.com/Yeadear/qqdump/msgproto"
 )
 
 // 列名常量。它们是协议字段编号，不是人为取的名字。

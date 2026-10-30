@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Yeadear/qqdump/internal/model"
+	"github.com/Yeadear/qqdump/model"
 )
 
 // cst 是 UTC+8，QQ 的时间戳按中国时区呈现才有意义。

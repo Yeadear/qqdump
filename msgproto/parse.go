@@ -18,7 +18,7 @@ import (
 
 	"google.golang.org/protobuf/proto"
 
-	"github.com/Yeadear/qqdump/internal/model"
+	"github.com/Yeadear/qqdump/model"
 )
 
 // ParseBody 解析 40800 列的内容为消息段列表。
@@ -27,13 +27,25 @@ func ParseBody(raw []byte) []model.Segment {
 	if len(raw) == 0 {
 		return nil
 	}
+
 	var body MsgBody
 	if err := proto.Unmarshal(raw, &body); err != nil {
+		// 极少数库把 BLOB 落成 hex 文本存储，先还原成字节再解一次。
+		if decoded, ok := tryHexText(raw); ok {
+			var b2 MsgBody
+			if proto.Unmarshal(decoded, &b2) == nil {
+				return segmentsOf(&b2, raw)
+			}
+		}
 		return []model.Segment{{Raw: raw}}
 	}
+	return segmentsOf(&body, raw)
+}
+
+// segmentsOf 把解出来的 MsgBody 转成段列表。
+// 老 wire 形态（40800 以 varint 出现）解不出 MsgContent，此时保留原始字节。
+func segmentsOf(body *MsgBody, raw []byte) []model.Segment {
 	if len(body.GetContent()) == 0 {
-		// 老 wire 形态（40800 以 varint 出现）会走到这里：拿不到 MsgContent，
-		// 但原始字节还在，不丢内容。
 		return []model.Segment{{Raw: raw}}
 	}
 	segs := make([]model.Segment, 0, len(body.GetContent()))
@@ -41,6 +53,28 @@ func ParseBody(raw []byte) []model.Segment {
 		segs = append(segs, convert(c))
 	}
 	return segs
+}
+
+// tryHexText 在 raw 看起来是一整串 hex 文本时把它解码成字节。
+func tryHexText(raw []byte) ([]byte, bool) {
+	// 必须是偶数长度，且全是 hex 字符
+	if len(raw) < 2 || len(raw)%2 != 0 {
+		return nil, false
+	}
+	for _, c := range raw {
+		if !isHexDigit(c) {
+			return nil, false
+		}
+	}
+	out := make([]byte, hex.DecodedLen(len(raw)))
+	if _, err := hex.Decode(out, raw); err != nil {
+		return nil, false
+	}
+	return out, true
+}
+
+func isHexDigit(c byte) bool {
+	return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
 }
 
 // ParseSingle 解析单个 MsgContent 的原始字节，用于 40900 等内嵌快照。
