@@ -1,0 +1,109 @@
+// QQ NT 消息体 Protobuf 定义（对应 nt_msg.db 的 40800 列）。
+//
+// 还原自 QQBackup/nt_msg_db_util 的 msgdb/proto/c2c_40800.proto，
+// 并按其 db_docs/c2c_msg_table/40800.md 的字段语义重新命名。
+//
+// 设计取舍：
+//   - 只声明有已确认语义的字段；其余 f##### 一律不声明，
+//     由 protobuf 落到 unknown fields，永不因类型推断错误而解析失败。
+//   - 凡是文档标注为 bytes、或被动态解析器误判过子消息的字段
+//     （特别是 45101 文本正文），一律声明为 bytes，由上层按 UTF-8 解码。
+//     这样即使内容实际是嵌套消息也不会 unmarshal 失败。
+//   - 外层是 MsgBody{repeated MsgContent}，一条消息可含多个段
+//     （图文混排），解析时必须保留段顺序。
+syntax = "proto3";
+
+package qqdump.msgproto;
+
+option go_package = "github.com/Yeadear/qqdump/internal/msgproto";
+
+// MsgBody 是 40800 列的外层包装。顶层只有 repeated content = 40800。
+message MsgBody {
+  repeated MsgContent content = 40800;
+}
+
+// MsgTimestamp 承载编辑/已读等时间扩展（45112 / 50202）。
+message MsgTimestamp {
+  int64 timestamp = 50202;
+  int32 f50205 = 50205;
+}
+
+// MediaRef 是媒体引用块（45526）。
+message MediaRef {
+  int64 uid = 45417;
+  int32 f45527 = 45527;
+  int64 f45529 = 45529;
+  string md5 = 45530;
+}
+
+// MsgContent 是一个消息段。
+message MsgContent {
+  // ---- 通用头部 ----
+  int64 msg_id = 45001; // 段级 ID，不等于表级 40001
+  int32 content_type = 45002; // 内容类型：1文本 2图片 3文件 4语音 5视频 6表情 ...
+  int32 media_sub = 45003; // 媒体子类型：1图片 2语音 7视频 11文件
+
+  // ---- 文本 ----
+  bytes text = 45101; // 文本正文；按 UTF-8 解码
+  int64 text_attr = 45102; // 文本属性标志
+  MsgTimestamp editing = 45112; // 编辑/已读时间扩展
+
+  // ---- 媒体基础 ----
+  bytes filename = 45402; // 文件名，常含 MD5 + 扩展名
+  bytes filepath = 45403; // 本地发送路径
+  int64 filesize = 45405; // 文件大小（字节）
+  bytes md5_raw = 45406; // 16 字节 raw MD5
+  bytes thumbnail = 45408; // 缩略图/校验 hash
+  int32 duration = 45410; // 短视频/语音时长（秒）
+  int32 img_width = 45411; // 图片宽度
+  int32 img_height = 45412; // 图片高度
+
+  // ---- 文件/转发 ----
+  string file_uuid = 45503;
+  bytes cdn_path = 45504;
+  int64 expire_ts = 45505;
+  int64 short_ttl_ts = 45515;
+  int32 short_ttl_dur = 45516;
+  int64 upload_ts = 45517;
+  MediaRef media_ref = 45526;
+  bytes sticker = 45600; // 表情二进制
+
+  // ---- CDN / 路径 ----
+  string cdn_url_1 = 45802;
+  string cdn_url_2 = 45803;
+  string cdn_url_3 = 45804;
+  string local_path = 45812;
+  string ntos_path = 45814;
+  string cdn_host = 45816;
+
+  // ---- 位置 ----
+  int32 loc_type = 45851;
+
+  // ---- 名片 ----
+  string nc_text = 45923;
+
+  // ---- 引用回复 ----
+  int64 reply_msg_id = 47401;
+  int64 reply_msg_seq = 47402;
+  int64 reply_msg_time = 47403;
+  string reply_summary = 47413;
+
+  // ---- 表情 / 视频 ----
+  int32 video_flag = 47601; // 表情 ID（face index）
+  bytes video_text = 47602; // 表情外显文字，如 "/汪汪"
+
+  // ---- 嵌套引用消息 ----
+  MsgContent ref_msg = 47710;
+
+  // ---- 合并转发 ----
+  string fwd_token = 47902;
+  string fwd_uuid = 47904;
+
+  // ---- 通话记录 ----
+  int32 call_type = 48151;
+  int32 call_duration = 48152;
+  string call_desc = 48153;
+
+  // ---- 系统灰条 ----
+  string sys_content = 80900;
+}

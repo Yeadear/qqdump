@@ -1,0 +1,16 @@
+# 真实数据库样本：含个人隐私，绝不入库
+*.db
+*.db-wal
+*.db-shm
+*.db-journal
+testdata/*.zip
+testdata/*.db
+
+# 构建产物
+/qqdump
+/dist/
+/out/
+
+# 本地临时文件
+*.log
+.DS_Store

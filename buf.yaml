@@ -1,0 +1,22 @@
+version: v2
+modules:
+  - path: proto
+lint:
+  use:
+    - STANDARD
+  # 本文件的字段编号由 QQ NT 协议固定，不是我们取的，因此不检查编号相关规则。
+  except:
+    - FIELD_SAME_NUMBER
+    - FIELD_SAME_NAME
+    - PACKAGE_DIRECTORY_MATCH
+    - ENUM_PASCAL_CASE
+    - ENUM_VALUE_PREFIX
+    - ENUM_ZERO_VALUE_SUFFIX
+    - RPC_PASCAL_CASE
+    - RPC_REQUEST_STANDARD_NAME
+    - RPC_RESPONSE_STANDARD_NAME
+    - RPC_REQUEST_RESPONSE_UNIQUE
+    - SERVICE_SUFFIX
+breaking:
+  use:
+    - FILE
