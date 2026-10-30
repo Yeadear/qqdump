@@ -27,7 +27,7 @@ const countExpr = "COUNT(*)"
 type DB struct {
 	*sql.DB
 	path   string
-	tables []string        // 按 C2C、Group 固定顺序
+	tables []string // 按 C2C、Group 固定顺序
 	cols   map[string][]string
 }
 

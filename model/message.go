@@ -54,19 +54,19 @@ const (
 // 未识别的语义原始 BLOB 保留在 Raw* 字段里，便于后续补齐协议。
 type Message struct {
 	// ---- 标识 ----
-	ID        int64 `json:"id"`                  // 40001 全局消息 ID（主键）
-	MsgRandom int64 `json:"msg_random"`          // 40002 消息随机数
-	Seq       int64 `json:"seq"`                 // 40003 c2c: 全局倒序序号；group: 群内序号
-	ClientSeq int64 `json:"client_seq"`          // 40005
-	ServerSeq int64 `json:"server_seq"`          // 40006
+	ID        int64 `json:"id"`         // 40001 全局消息 ID（主键）
+	MsgRandom int64 `json:"msg_random"` // 40002 消息随机数
+	Seq       int64 `json:"seq"`        // 40003 c2c: 全局倒序序号；group: 群内序号
+	ClientSeq int64 `json:"client_seq"` // 40005
+	ServerSeq int64 `json:"server_seq"` // 40006
 
 	// ---- 会话定位 ----
-	ChatType  int    `json:"chat_type"`            // 40010 1=私聊 2=群聊
-	MsgType   int    `json:"msg_type"`             // 40011 外层消息类型
-	SubType   int64  `json:"sub_type"`             // 40012 子类型位掩码
-	SessionID int64  `json:"session_id"`           // 40027 本地会话键
-	PeerUID   string `json:"peer_uid,omitempty"`   // 40021 c2c: 对方 UID；group: 群 ID
-	PeerUIN   int64  `json:"peer_uin"`             // 40030 c2c: 对方 QQ；group: 群号
+	ChatType  int    `json:"chat_type"`          // 40010 1=私聊 2=群聊
+	MsgType   int    `json:"msg_type"`           // 40011 外层消息类型
+	SubType   int64  `json:"sub_type"`           // 40012 子类型位掩码
+	SessionID int64  `json:"session_id"`         // 40027 本地会话键
+	PeerUID   string `json:"peer_uid,omitempty"` // 40021 c2c: 对方 UID；group: 群 ID
+	PeerUIN   int64  `json:"peer_uin"`           // 40030 c2c: 对方 QQ；group: 群号
 
 	// ---- 发送者 ----
 	SenderUID  string `json:"sender_uid,omitempty"`  // 40020 发送者 NT UID
@@ -143,26 +143,26 @@ type Segment struct {
 	Text string `json:"text,omitempty"` // 45101
 
 	// 媒体/文件
-	FileName string `json:"file_name,omitempty"` // 45402
-	FileSize int64  `json:"file_size,omitempty"` // 45405
-	FileUUID string `json:"file_uuid,omitempty"` // 45503
-	MD5      string `json:"md5,omitempty"`       // 45406（hex）
+	FileName  string `json:"file_name,omitempty"`  // 45402
+	FileSize  int64  `json:"file_size,omitempty"`  // 45405
+	FileUUID  string `json:"file_uuid,omitempty"`  // 45503
+	MD5       string `json:"md5,omitempty"`        // 45406（hex）
 	LocalPath string `json:"local_path,omitempty"` // 45812 手机本地路径
 	NTOSPath  string `json:"ntos_path,omitempty"`  // 45814 NTOS 路径
 	URL       string `json:"url,omitempty"`        // 可用的 CDN 直链
 
 	// 图片/视频
-	Width    int32 `json:"width,omitempty"`     // 45411
-	Height   int32 `json:"height,omitempty"`    // 45412
-	Duration int32 `json:"duration,omitempty"`  // 45410 秒
+	Width    int32 `json:"width,omitempty"`    // 45411
+	Height   int32 `json:"height,omitempty"`   // 45412
+	Duration int32 `json:"duration,omitempty"` // 45410 秒
 
 	// 表情
 	FaceID   int32  `json:"face_id,omitempty"`   // 47601
 	FaceText string `json:"face_text,omitempty"` // 47602 如 "/汪汪"
 
 	// 引用回复
-	ReplyTo   int64  `json:"reply_to,omitempty"`    // 47401 被引用消息 ID
-	ReplyText string `json:"reply_text,omitempty"`  // 47413 被引用内容摘要
+	ReplyTo   int64  `json:"reply_to,omitempty"`   // 47401 被引用消息 ID
+	ReplyText string `json:"reply_text,omitempty"` // 47413 被引用内容摘要
 
 	// 系统/通话/转发
 	SysContent   string `json:"sys_content,omitempty"`   // 80900

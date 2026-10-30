@@ -8,6 +8,7 @@
 //  2. 失败则退化为保留原始字节的单个 unknown 段；
 //  3. 个别只有 varint 形态（wire key 40800-1）的老记录无法按本 schema 解码，
 //     同样保留原始字节。
+//
 // 无论如何都不静默丢弃内容。
 package msgproto
 

@@ -8,6 +8,7 @@ testdata/*.db
 
 # 构建产物
 /qqdump
+/bin/
 /dist/
 /out/
 

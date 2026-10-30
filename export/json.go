@@ -11,54 +11,54 @@ import (
 
 // JSON 是结构化中间格式：完整保留解析出的一切，供后续工具消费。
 type JSON struct {
-	GeneratedAt string         `json:"generated_at"`
-	Tool        string         `json:"tool"`
-	Source      string         `json:"source,omitempty"`
-	Count       int            `json:"conversation_count"`
-	Convers     []JSONConv     `json:"conversations"`
+	GeneratedAt string     `json:"generated_at"`
+	Tool        string     `json:"tool"`
+	Source      string     `json:"source,omitempty"`
+	Count       int        `json:"conversation_count"`
+	Convers     []JSONConv `json:"conversations"`
 }
 
 // JSONConv 是一个会话。
 type JSONConv struct {
-	ID       int64        `json:"id"`
-	Kind     string       `json:"kind"`
-	PeerUIN  int64        `json:"peer_uin"`
-	PeerUID  string       `json:"peer_uid,omitempty"`
-	Name     string       `json:"name,omitempty"`
-	Messages []JSONMsg    `json:"messages"`
+	ID       int64     `json:"id"`
+	Kind     string    `json:"kind"`
+	PeerUIN  int64     `json:"peer_uin"`
+	PeerUID  string    `json:"peer_uid,omitempty"`
+	Name     string    `json:"name,omitempty"`
+	Messages []JSONMsg `json:"messages"`
 }
 
 // JSONMsg 是一条消息。
 type JSONMsg struct {
-	ID         int64          `json:"id"`
-	Time       string         `json:"time"`
-	Timestamp  int64          `json:"timestamp"`
-	IsSend     bool           `json:"is_send"`
-	Direction  int            `json:"direction"`
-	SenderUIN  int64          `json:"sender_uin"`
-	SenderName string         `json:"sender_name,omitempty"`
-	Segments   []JSONSegment  `json:"segments"`
+	ID         int64         `json:"id"`
+	Time       string        `json:"time"`
+	Timestamp  int64         `json:"timestamp"`
+	IsSend     bool          `json:"is_send"`
+	Direction  int           `json:"direction"`
+	SenderUIN  int64         `json:"sender_uin"`
+	SenderName string        `json:"sender_name,omitempty"`
+	Segments   []JSONSegment `json:"segments"`
 }
 
 // JSONSegment 是一个消息段。
 type JSONSegment struct {
-	Kind     string `json:"kind"`
-	KindID   int32  `json:"kind_id"`
-	Text     string `json:"text,omitempty"`
-	FileName string `json:"file_name,omitempty"`
-	FileSize int64  `json:"file_size,omitempty"`
+	Kind          string `json:"kind"`
+	KindID        int32  `json:"kind_id"`
+	Text          string `json:"text,omitempty"`
+	FileName      string `json:"file_name,omitempty"`
+	FileSize      int64  `json:"file_size,omitempty"`
 	FileSizeHuman string `json:"file_size_human,omitempty"`
-	MD5      string `json:"md5,omitempty"`
-	URL      string `json:"url,omitempty"`
-	Path     string `json:"path,omitempty"`
-	Width    int32  `json:"width,omitempty"`
-	Height   int32  `json:"height,omitempty"`
-	Duration int32  `json:"duration,omitempty"`
-	FaceID   int32  `json:"face_id,omitempty"`
-	FaceText string `json:"face_text,omitempty"`
-	ReplyTo  int64  `json:"reply_to,omitempty"`
-	ReplyText string `json:"reply_text,omitempty"`
-	HasRaw   bool   `json:"has_raw,omitempty"`
+	MD5           string `json:"md5,omitempty"`
+	URL           string `json:"url,omitempty"`
+	Path          string `json:"path,omitempty"`
+	Width         int32  `json:"width,omitempty"`
+	Height        int32  `json:"height,omitempty"`
+	Duration      int32  `json:"duration,omitempty"`
+	FaceID        int32  `json:"face_id,omitempty"`
+	FaceText      string `json:"face_text,omitempty"`
+	ReplyTo       int64  `json:"reply_to,omitempty"`
+	ReplyText     string `json:"reply_text,omitempty"`
+	HasRaw        bool   `json:"has_raw,omitempty"`
 }
 
 // WriteJSON 把会话导出为 JSON。

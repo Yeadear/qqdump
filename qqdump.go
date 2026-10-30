@@ -10,10 +10,10 @@
 //
 // 完整链路是四步，每一步都可以单独使用：
 //
-//	1. account：扫描 QQ 数据目录定位 nt_msg.db，从 1024 字节头读出 rand
-//	2. cipher：剥掉自定义头，用 md5(md5(uid)+rand) 解密 SQLCipher
-//	3. db + msgproto：读出原始行，把 40800 的 Protobuf 解析成消息段
-//	4. export：渲染成 JSON / Markdown / HTML
+//  1. account：扫描 QQ 数据目录定位 nt_msg.db，从 1024 字节头读出 rand
+//  2. cipher：剥掉自定义头，用 md5(md5(uid)+rand) 解密 SQLCipher
+//  3. db + msgproto：读出原始行，把 40800 的 Protobuf 解析成消息段
+//  4. export：渲染成 JSON / Markdown / HTML
 package qqdump
 
 import (
