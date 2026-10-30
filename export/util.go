@@ -77,6 +77,11 @@ func SafeName(s string) string {
 	}
 	s = strings.ReplaceAll(s, string(filepath.Separator), "_")
 	out := unsafeChars.ReplaceAllString(s, "_")
+	// ".." 单独出现时也不留下：它是路径穿越的记号，即使分隔符已被替换掉
+	// 也一并清理，避免拼进路径后产生歧义。
+	for strings.Contains(out, "..") {
+		out = strings.ReplaceAll(out, "..", "_")
+	}
 	out = strings.Trim(out, "_.")
 	if out == "" {
 		return "unnamed"

@@ -177,30 +177,49 @@ type uidDir struct {
 	qqDir string
 }
 
+// qqPkgName 是 QQ 的 Android 包名。
+const qqPkgName = "com.tencent.mobileqq"
+
 // findUIDDirs 找出形如 .../com.tencent.mobileqq/files/uid/{uin}###{uid} 的目录。
+//
+// 这里用遍历而不是 Glob：Glob 的 ** 并不递归，而用户的根目录可以是任意一层
+// （/、/data、/data/data，或者 adb pull 出来的任意目录），深度不确定。
+// 一旦定位到 QQ 的包目录就停下去，不再往里钻，避免扫遍整机。
 func (s *Scanner) findUIDDirs() ([]uidDir, error) {
-	pattern := filepath.Join(s.Root, "**", "com.tencent.mobileqq", "files", "uid", "*")
 	var out []uidDir
-	matches, err := filepath.Glob(pattern)
-	if err != nil {
-		return nil, err
-	}
-	// 也覆盖 Root 本身就是 com.tencent.mobileqq 的情况
-	if inner, err := filepath.Glob(filepath.Join(s.Root, "files", "uid", "*")); err == nil {
-		matches = append(matches, inner...)
+
+	handle := func(qqDir string) {
+		entries, err := os.ReadDir(filepath.Join(qqDir, "files", "uid"))
+		if err != nil {
+			return
+		}
+		for _, e := range entries {
+			uin, uid, ok := splitUIDName(e.Name())
+			if !ok {
+				continue
+			}
+			out = append(out, uidDir{user: userOf(qqDir), uin: uin, uid: uid, qqDir: qqDir})
+		}
 	}
 
-	for _, p := range matches {
-		name := filepath.Base(p)
-		uin, uid, ok := splitUIDName(name)
-		if !ok {
-			continue
-		}
-		// .../files/uid/x 的上两级就是 com.tencent.mobileqq
-		qqDir := filepath.Dir(filepath.Dir(p))
-		out = append(out, uidDir{user: userOf(qqDir), uin: uin, uid: uid, qqDir: qqDir})
+	// 用户可能直接把根目录指到 QQ 的包目录上
+	if filepath.Base(s.Root) == qqPkgName {
+		handle(s.Root)
 	}
-	return out, nil
+
+	err := filepath.WalkDir(s.Root, func(path string, d os.DirEntry, err error) error {
+		if err != nil || !d.IsDir() {
+			return nil // 权限不足或不是目录，跳过继续扫
+		}
+		if d.Name() != qqPkgName {
+			return nil
+		}
+		if path != s.Root {
+			handle(path)
+		}
+		return filepath.SkipDir
+	})
+	return out, err
 }
 
 // splitUIDName 解析 "{uin}###{uid}" 形式的目录名。
@@ -216,10 +235,11 @@ func splitUIDName(name string) (uin, uid string, ok bool) {
 	return uin, uid, true
 }
 
+// userOf 取出 Android 多用户 ID（.../data/user/{user}/com.tencent.mobileqq）。
+// 不在多用户目录下时返回空，不强猜。
 func userOf(qqDir string) string {
-	// .../data/user/{user}/com.tencent.mobileqq
 	parent := filepath.Dir(qqDir)
-	if filepath.Base(parent) == "user" {
+	if filepath.Base(filepath.Dir(parent)) != "user" {
 		return ""
 	}
 	return filepath.Base(parent)

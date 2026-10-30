@@ -92,6 +92,12 @@ func ParseSingle(raw []byte) model.Segment {
 func convert(c *MsgContent) model.Segment {
 	s := model.Segment{Kind: c.GetContentType()}
 
+	// 45101 名义上是文本，但少数情况下 QQ 会往里放别的东西（例如一段嵌套
+	// 消息）。一旦它不是合法 UTF-8，解码必然有损，因此把原始字节留下来，
+	// 保证内容不丢——这是"绝不静默丢弃"的兑现。
+	if raw := c.GetText(); len(raw) > 0 && !utf8.Valid(raw) {
+		s.Raw = raw
+	}
 	s.Text = decodeText(c.GetText())
 	s.FileName = decodeText(c.GetFilename())
 	s.FileSize = c.GetFilesize()

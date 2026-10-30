@@ -19,6 +19,10 @@ const (
 	TableGroup = "group_msg_table"
 )
 
+// countExpr 是统计每个会话消息数的表达式。它必须原样拼进 SQL，
+// 一旦加引号就变成列名了。
+const countExpr = "COUNT(*)"
+
 // DB 是一个已打开的明文库，附带探测到的表/列信息。
 type DB struct {
 	*sql.DB
@@ -138,22 +142,23 @@ func (d *DB) Sessions(table string) ([]Session, error) {
 		return nil, fmt.Errorf("db: %s 缺少会话列", table)
 	}
 
-	sel := make([]string, 0, len(have)+3)
-	sel = append(sel, have...)
+	// 列名与 SELECT 表达式分开存：COUNT(*) 是表达式，加引号就变成列名了。
+	names := append([]string{}, have...)
 	if d.Has(table, ColPeerUID) {
-		sel = append(sel, ColPeerUID)
+		names = append(names, ColPeerUID)
 	}
 	if d.Has(table, ColChatType) {
-		sel = append(sel, ColChatType)
+		names = append(names, ColChatType)
 	}
 	if d.Has(table, ColSenderName) {
-		sel = append(sel, ColSenderName)
+		names = append(names, ColSenderName)
 	}
-	sel = append(sel, "COUNT(*)")
+	exprs := append(quoteAll(names), countExpr)
+	names = append(names, countExpr)
 
 	groupBy := strings.Join(quoteAll(have), ", ")
 	q := fmt.Sprintf(`SELECT %s FROM %s GROUP BY %s ORDER BY MAX(%s) DESC`,
-		strings.Join(quoteAll(sel), ", "), quote(table), groupBy, quote(ColPeerUIN))
+		strings.Join(exprs, ", "), quote(table), groupBy, quote(ColPeerUIN))
 
 	rows, err := d.DB.Query(q)
 	if err != nil {
@@ -163,8 +168,8 @@ func (d *DB) Sessions(table string) ([]Session, error) {
 
 	var out []Session
 	for rows.Next() {
-		dest := make([]any, len(sel))
-		vals := make([]any, len(sel))
+		dest := make([]any, len(names))
+		vals := make([]any, len(names))
 		for i := range vals {
 			dest[i] = &vals[i]
 		}
@@ -172,7 +177,7 @@ func (d *DB) Sessions(table string) ([]Session, error) {
 			return nil, err
 		}
 		s := Session{Table: table}
-		for i, col := range sel {
+		for i, col := range names {
 			v := vals[i]
 			switch col {
 			case ColPeerUIN:
@@ -185,7 +190,7 @@ func (d *DB) Sessions(table string) ([]Session, error) {
 				s.ChatType = int(toInt64(v))
 			case ColSenderName:
 				s.Name, _ = v.(string)
-			case "COUNT(*)":
+			case countExpr:
 				s.Count = toInt64(v)
 			}
 		}
