@@ -31,6 +31,7 @@ type JSONConv struct {
 // JSONMsg 是一条消息。
 type JSONMsg struct {
 	ID         int64         `json:"id"`
+	Seq        int64         `json:"seq,omitempty"`
 	Time       string        `json:"time"`
 	Timestamp  int64         `json:"timestamp"`
 	IsSend     bool          `json:"is_send"`

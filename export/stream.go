@@ -110,6 +110,7 @@ func (c *ConvStream) Count() int { return c.count }
 func toJSONMsg(m model.Message) JSONMsg {
 	jm := JSONMsg{
 		ID:         m.ID,
+		Seq:        m.Seq,
 		Time:       FmtTime(m.Timestamp),
 		Timestamp:  m.Timestamp,
 		IsSend:     m.IsSend(),
