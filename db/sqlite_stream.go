@@ -411,8 +411,10 @@ func (s *StreamDB) localPayload(cellBody []byte, plen int) ([]byte, error) {
 	for remaining > 0 && next != 0 {
 		page, err := s.dec.DecryptPage(next)
 		if err != nil {
-			if errors.Is(err, cipher.ErrCorruptPage) {
-				break // overflow 链坏页：尽力返回已拿到的部分
+			// 坏页或越界页号都只影响这一条超大字段，已拿到的部分照样返回，
+			// 不要让单条消息毁掉整张表的遍历。
+			if errors.Is(err, cipher.ErrCorruptPage) || errors.Is(err, cipher.ErrPageOutOfRange) {
+				break
 			}
 			return nil, err
 		}
