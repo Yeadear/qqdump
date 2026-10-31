@@ -224,10 +224,7 @@ func (s *StreamDB) StreamSessionMessagesWindow(table string, peer int64, f Filte
 			return nil
 		}
 		sort.SliceStable(buf, func(i, j int) bool {
-			if buf[i].Timestamp != buf[j].Timestamp {
-				return buf[i].Timestamp < buf[j].Timestamp
-			}
-			return buf[i].ID < buf[j].ID
+			return lessMessage(buf[i], buf[j])
 		})
 		for _, m := range buf {
 			if err := cb(m); err != nil {
@@ -317,10 +314,7 @@ func (s *StreamDB) StreamFanout(table string, sinks []*FanoutSink, f Filter, win
 			return nil
 		}
 		sort.SliceStable(st.buf, func(i, j int) bool {
-			if st.buf[i].Timestamp != st.buf[j].Timestamp {
-				return st.buf[i].Timestamp < st.buf[j].Timestamp
-			}
-			return st.buf[i].ID < st.buf[j].ID
+			return lessMessage(st.buf[i], st.buf[j])
 		})
 		if !st.open && st.sink.Conversation != nil {
 			st.open = true
@@ -346,6 +340,9 @@ func (s *StreamDB) StreamFanout(table string, sinks []*FanoutSink, f Filter, win
 		}
 		vals := mapColumns(ti.cols, cols)
 		m := fill(vals, ti.chatType)
+		if m.IsPlaceholder() {
+			return nil // 时间戳为 0 的空壳行，不是真实消息
+		}
 		// 先按会话筛，再做时间等过滤：不关心的消息连对象都不必造全。
 		st, ok := byPeer[m.PeerUIN]
 		if !ok {
@@ -790,4 +787,24 @@ func readVarint(b []byte, off int) (uint64, int, error) {
 		}
 	}
 	return v, 9, nil
+}
+
+// lessMessage 是消息在会话内的排序规则。
+//
+// 排序键的优先级：
+//  1. Seq（40003）——群表里是"群内依次递增的序号"，c2c 表里是全局序号；
+//     同一会话内它单调递增，是最可靠的顺序依据。
+//  2. Timestamp（40050）——Seq 为 0 的旧数据回退到时间。
+//  3. ID（40001）——最后兜底，保证结果稳定。
+//
+// 只按时间排会在边界上错位：同一秒内多条消息、或某台设备时钟回拨，都会让
+// 相邻消息的先后颠倒，所以时间只能当回退项。
+func lessMessage(a, b model.Message) bool {
+	if a.Seq != 0 && b.Seq != 0 && a.Seq != b.Seq {
+		return a.Seq < b.Seq
+	}
+	if a.Timestamp != b.Timestamp {
+		return a.Timestamp < b.Timestamp
+	}
+	return a.ID < b.ID
 }

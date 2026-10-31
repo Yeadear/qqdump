@@ -302,3 +302,16 @@ func (s Segment) KindLabel() string {
 		return "unknown"
 	}
 }
+
+// IsPlaceholder 报告这条记录是否是库里的占位/残行。
+//
+// nt_msg.db 里存在 40050=0（时间戳为零）且没有正文的行——它们是删除、迁库、
+// 或写入中断留下的空壳。真实消息一定有时间戳，把这类行当消息导出只会产出
+// 一堆 "1970-01-01 未知 空内容"，所以统一在读取阶段丢弃。
+func (m Message) IsPlaceholder() bool {
+	if m.Timestamp != 0 {
+		return false
+	}
+	// 时间戳为零但确实带了正文时保留（极少数旧库如此），避免误删。
+	return len(m.Segments) == 0
+}
