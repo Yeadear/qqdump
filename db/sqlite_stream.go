@@ -196,9 +196,16 @@ func (s *StreamDB) StreamSessionMessages(table string, peer int64, f Filter, cb 
 	return s.StreamSessionMessagesWindow(table, peer, f, SortWindow, cb)
 }
 
-// SortWindow 是流式排序窗口的默认大小。窗口越大顺序越准、内存越多；
+// SortWindow 是单会话流式排序窗口的默认大小。窗口越大顺序越准、内存越多；
 // 4096 条大约几 MB，对聊天记录足够（同一会话内时间错位通常只跨几十条）。
 const SortWindow = 4096
+
+// FanoutWindow 是单遍多会话扇出时每个会话的排序窗口。
+//
+// 扇出要同时为所有会话保留窗口，内存约等于「会话数 × 窗口」。一个 660 万条的
+// 账号有 1600 多个会话，用 4096 会吃到 2.9GB；512 条已足够纠正同会话内的时间
+// 错位（实测错位通常只有几十条），内存降到几百 MB。
+const FanoutWindow = 512
 
 // StreamSessionMessagesWindow 是 StreamSessionMessages 的可调窗口版本。
 func (s *StreamDB) StreamSessionMessagesWindow(table string, peer int64, f Filter, window int, cb func(model.Message) error) error {

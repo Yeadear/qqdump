@@ -383,7 +383,7 @@ func DumpStream(src string, opt Options, h StreamHandler) error {
 			Since: opt.Since,
 			Until: opt.Until,
 			Limit: opt.Limit,
-		}, 0)
+		}, db.FanoutWindow)
 		if ferr != nil {
 			if opt.Tolerant {
 				log.Printf("警告: 表 %s 读取中断（可能受坏页影响），已导出部分会话: %v", table, ferr)
