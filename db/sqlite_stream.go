@@ -310,7 +310,7 @@ func (s *StreamDB) walkPage(pgno uint32, q *[]uint32, cb func(int64, []byte) err
 
 func (s *StreamDB) walkLeaf(content []byte, hdr int, cb func(int64, []byte) error) error {
 	nCells := int(binary.BigEndian.Uint16(content[hdr+3 : hdr+5]))
-	if 8+2*nCells > len(content) {
+	if hdr+8+2*nCells > len(content) {
 		return nil
 	}
 	cellPtrs := content[hdr+8 : hdr+8+2*nCells]
@@ -375,10 +375,11 @@ func (s *StreamDB) localPayload(cellBody []byte, plen int) ([]byte, error) {
 		}
 		return cellBody[:plen], nil
 	}
-	// 本地存放的部分必须留下 4 字节存 overflow 首页号。
+	// SQLite 的规则：先按 mod 算出建议的本地长度，若它超过 maxLocal，
+	// 则退回 minLocal —— 保证本地部分一定放得下（还要留 4 字节存首页号）。
 	local := minLocal + (plen-minLocal)%(U-4)
-	if local > plen {
-		local = plen
+	if local > maxLocal {
+		local = minLocal
 	}
 	if len(cellBody) < local+4 {
 		return nil, fmt.Errorf("db: overflow 头越界（需要 %d，cell 只有 %d）", local+4, len(cellBody))

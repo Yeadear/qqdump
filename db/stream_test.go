@@ -236,8 +236,11 @@ func TestLocalPayloadOverflow(t *testing.T) {
 		orig[i] = byte(i % 251)
 	}
 	local := minLocal + (plen-minLocal)%(U-4)
-	if local >= plen {
-		t.Fatalf("测试构造有误：local=%d plen=%d", local, plen)
+	if local > maxLocal {
+		local = minLocal
+	}
+	if local >= plen || local > maxLocal {
+		t.Fatalf("测试构造有误：local=%d plen=%d maxLocal=%d", local, plen, maxLocal)
 	}
 
 	// 把 payload 切成 local + 若干 overflow 页
