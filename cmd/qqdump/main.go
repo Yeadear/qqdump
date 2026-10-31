@@ -27,6 +27,7 @@ import (
 	"github.com/Yeadear/qqdump"
 	"github.com/Yeadear/qqdump/account"
 	"github.com/Yeadear/qqdump/cipher"
+	"github.com/Yeadear/qqdump/db"
 	"github.com/Yeadear/qqdump/export"
 	"github.com/Yeadear/qqdump/model"
 )
@@ -539,6 +540,7 @@ func cmdDiagnose(args []string) error {
 	in := flagStr(fs, "i", "input", "", "只诊断这一个 nt_msg.db")
 	d := flagStr(fs, "d", "data", "", "QQ 数据目录")
 	uid := flagStr(fs, "u", "uid", "", "NT UID")
+	master := flagBool(fs, "", "master", false, "打印 sqlite_master 的解析详情（排查用）")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -550,6 +552,22 @@ func cmdDiagnose(args []string) error {
 		if err != nil {
 			return err
 		}
+	}
+
+	if master() {
+		if in() == "" {
+			return fmt.Errorf("diagnose --master: 需要 -i/--input <nt_msg.db>")
+		}
+		k, err := resolveKey(in(), "", uid())
+		if err != nil {
+			return err
+		}
+		sdb, err := db.OpenEncryptedStream(in(), k, true)
+		if err != nil {
+			return err
+		}
+		defer sdb.Close()
+		return sdb.DebugMaster(os.Stdout)
 	}
 
 	jobs, err := collectJobs(in(), root, "", uid(), "")

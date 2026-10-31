@@ -277,3 +277,38 @@ func TestLocalPayloadOverflow(t *testing.T) {
 		t.Fatalf("overflow 拼接结果不一致：got %d 字节, want %d", len(got), len(orig))
 	}
 }
+
+// TestLeafCellOffsets 校验 page 1 的 leaf 页头（前 100 字节是文件头）能正确
+// 定位 cell 指针——NTQQ 的 sqlite_master 就在 page 1。
+func TestLeafCellOffsets(t *testing.T) {
+	U := 512
+	p1 := make([]byte, U)
+	copy(p1, "SQLite format 3\x00")
+	// 文件头里声明页大小
+	binary.BigEndian.PutUint16(p1[16:], uint16(U))
+	p1[100] = 0x0d // leaf table，位于 100 字节文件头之后
+	recs := [][]byte{makeRecord("c2c_msg_table", 5)}
+	off := U - (1 + 1 + len(recs[0]))
+	copy(p1[off:], encVarint(uint64(len(recs[0]))))
+	copy(p1[off+1:], encVarint(1))
+	copy(p1[off+2:], recs[0])
+	binary.BigEndian.PutUint16(p1[100+3:], 1)
+	binary.BigEndian.PutUint16(p1[100+8:], uint16(off))
+
+	fr := &fakeReader{pages: map[uint32][]byte{1: p1}, usable: U}
+	s := &StreamDB{dec: fr, usable: U, tables: map[string]tableInfo{}}
+	var got []string
+	if err := s.walkTable(1, func(_ int64, payload []byte) error {
+		cols, err := parseRecord(payload)
+		if err != nil {
+			return err
+		}
+		got = append(got, cols[0].(string))
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0] != "c2c_msg_table" {
+		t.Fatalf("page1 cell 解析 = %v", got)
+	}
+}
