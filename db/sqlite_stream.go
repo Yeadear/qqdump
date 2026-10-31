@@ -29,6 +29,7 @@ type StreamDB struct {
 	usable   int
 	pageSize int
 	pages    uint32 // 文件页数，用于挡越界指针；0 表示未知
+	skipped  int    // 遍历时跳过的 cell 数（坏页/坏指针/坏 payload）
 	tables   map[string]tableInfo
 }
 
@@ -326,20 +327,26 @@ func (s *StreamDB) walkLeaf(content []byte, hdr int, cb func(int64, []byte) erro
 	for i := 0; i < nCells; i++ {
 		ptr := int(binary.BigEndian.Uint16(cellPtrs[2*i : 2*i+2]))
 		if ptr < hdr || ptr >= len(content) {
+			s.skipped++
 			continue
 		}
 		cell := content[ptr:]
 		plen, n1, err := readVarint(cell, 0)
 		if err != nil {
-			return err
+			s.skipped++
+			continue
 		}
 		rowid, n2, err := readVarint(cell, n1)
 		if err != nil {
-			return err
+			s.skipped++
+			continue
 		}
 		payload, err := s.localPayload(cell[n1+n2:], int(plen))
 		if err != nil {
-			return err
+			// 单条读不出来（真正损坏的那格，或结构异常的个别 cell）不该让整表
+			// 失败——6.6GB 的库里 27 万条 C2C 只有几十条落在坏页上。
+			s.skipped++
+			continue
 		}
 		if err := cb(int64(rowid), payload); err != nil {
 			return err
@@ -347,6 +354,10 @@ func (s *StreamDB) walkLeaf(content []byte, hdr int, cb func(int64, []byte) erro
 	}
 	return nil
 }
+
+// Skipped 返回遍历过程中被跳过的 cell 数（坏页/坏指针/坏 payload）。
+// 导出结束时可用它提示"有 N 条消息因源库损坏未能读取"。
+func (s *StreamDB) Skipped() int { return s.skipped }
 
 func (s *StreamDB) walkInterior(content []byte, hdr int, q *[]uint32, cb func(int64, []byte) error) error {
 	nCells := int(binary.BigEndian.Uint16(content[hdr+3 : hdr+5]))
