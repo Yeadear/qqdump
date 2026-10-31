@@ -38,4 +38,5 @@ func TestZZHeaderReserve(t *testing.T) {
 	sz := int(p1[16])<<8 | int(p1[17])
 	fmt.Printf("文件头声明 pageSize=%d，代码用 %d；reserve 字节(20)=%d，代码用 %d；页数=%d\n",
 		sz, d.PageSize(), p1[20], d.PageSize()-d.UsableSize(), d.PageCount())
+	fmt.Printf("page1 尾部 96 字节: %x\n", p1[len(p1)-96:])
 }
