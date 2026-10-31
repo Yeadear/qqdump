@@ -55,7 +55,9 @@ export 选项:
   --since <时间>      起始时间，2006-01-02 或 Unix 秒
   --until <时间>      结束时间，同上
   -n, --limit <条数>  每个会话最多导出多少条（0 为不限）
-  --keep              保留解密出的明文库
+  --keep              保留解密出的明文库（会关闭流式）
+  --tolerant          解密遇到坏页时跳过并尽力导出其余数据（默认开启）
+  --stream            流式导出：边解密边写出，不落明文、不整库载入内存（默认开启）
 
 例子:
   # 手机上 root 后直接跑，自动找全部账号并导出
@@ -320,6 +322,7 @@ func cmdExport(args []string) error {
 	limit := flagInt(fs, "n", "limit", 0, "每个会话最多条数")
 	keep := flagBool(fs, "", "keep", false, "保留明文库")
 	tolerant := flagBool(fs, "", "tolerant", true, "解密遇到坏页时跳过并尽力导出其余数据")
+	stream := flagBool(fs, "", "stream", true, "流式导出：不落明文、不整库载入内存（默认开启）")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -376,6 +379,19 @@ func cmdExport(args []string) error {
 			opt.PlainPath = filepath.Join(dir, "nt_msg_plain.db")
 		}
 
+		if stream() && !keep() {
+			log.Printf("流式导出 %s（不落明文）", j.db)
+			texts, count, err := exportStream(j.db, dir, opt, wantFormats)
+			if err != nil {
+				log.Printf("跳过 %s：%v", j.db, err)
+				failed = append(failed, j)
+				continue
+			}
+			log.Printf("共 %d 个会话 / %d 条消息", texts, count)
+			log.Printf("已导出到 %s", dir)
+			continue
+		}
+
 		log.Printf("解密并读取 %s", j.db)
 		convs, err := qqdump.Dump(j.db, opt)
 		if err != nil {
@@ -410,6 +426,135 @@ func firstFailed(js []exportJob) string {
 		return ""
 	}
 	return js[0].db
+}
+
+// exportStream 流式导出：不落明文库，逐页解密、逐条消息写出。
+// 返回（会话数, 消息数, error）。
+//
+// JSON 在流式模式下按会话分文件（conversations/<会话>.json），
+// 因为把所有会话汇成一个大 JSON 数组必然要把全部消息留在内存里或反复回写，
+// 与"流式"的初衷相违。
+func exportStream(src, dir string, opt qqdump.Options, formats map[string]bool) (int, int, error) {
+	if opt.Key == "" {
+		return 0, 0, fmt.Errorf("流式导出需要密钥")
+	}
+	var (
+		convs  int
+		msgs   int
+		cur    *os.File
+		curCS  *export.ConvStream
+		curMeta model.Conversation
+		closeCur = func() error {
+			if curCS != nil {
+				if err := curCS.Close(); err != nil {
+					cur.Close()
+					curCS = nil
+					return err
+				}
+				curCS = nil
+			}
+			if cur != nil {
+				err := cur.Close()
+				cur = nil
+				return err
+			}
+			return nil
+		}
+	)
+
+	// 流式模式下 html/md 每会话一个文件；json 分片放在 conversations/ 目录。
+	if formats["json"] {
+		if err := os.MkdirAll(filepath.Join(dir, "conversations"), 0o755); err != nil {
+			return 0, 0, err
+		}
+	}
+
+	// 选择主格式（每会话写文件的那个）。
+	primary := ""
+	switch {
+	case formats["html"]:
+		primary = "html"
+	case formats["md"]:
+		primary = "markdown"
+	case formats["json"]:
+		primary = "json"
+	}
+
+	h := qqdump.StreamHandler{
+		Conversation: func(meta model.Conversation) error {
+			if err := closeCur(); err != nil {
+				return err
+			}
+			curMeta = meta
+			convs++
+			if primary == "" {
+				return nil
+			}
+			name := export.FileName(meta)
+			ext := map[string]string{"html": ".html", "markdown": ".md", "json": ".json"}[primary]
+			sub := dir
+			if primary == "json" {
+				sub = filepath.Join(dir, "conversations")
+			}
+			f, err := os.Create(filepath.Join(sub, name+ext))
+			if err != nil {
+				return err
+			}
+			cur = f
+			curCS = export.NewConvStream(primary, f, meta)
+			return nil
+		},
+		Message: func(m model.Message) error {
+			msgs++
+			if curCS == nil {
+				return nil
+			}
+			return curCS.Write(m)
+		},
+		Done: func(_ model.Conversation, _ int) error {
+			// 多格式时补写次要格式（会再读一遍该会话，但内存仍恒定）
+			if err := closeCur(); err != nil {
+				return err
+			}
+			for _, f := range []string{"html", "md"} {
+				if !formats[f] || f == primary {
+					continue
+				}
+				want := "html"
+				ext := ".html"
+				if f == "md" {
+					want = "markdown"
+					ext = ".md"
+				}
+				p := filepath.Join(dir, export.FileName(curMeta)+ext)
+				file, err := os.Create(p)
+				if err != nil {
+					return err
+				}
+				cs := export.NewConvStream(want, file, curMeta)
+				rerr := qqdump.ReplaySession(src, opt, curMeta, cs.Write)
+				if cerr := cs.Close(); cerr != nil && rerr == nil {
+					rerr = cerr
+				}
+				if err := file.Close(); err != nil && rerr == nil {
+					rerr = err
+				}
+				if rerr != nil {
+					return rerr
+				}
+			}
+			return nil
+		},
+	}
+
+	if err := qqdump.DumpStream(src, opt, h); err != nil {
+		closeCur()
+		return convs, msgs, err
+	}
+	if err := closeCur(); err != nil {
+		return convs, msgs, err
+	}
+	return convs, msgs, nil
 }
 
 // ---- diagnose ----

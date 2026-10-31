@@ -273,3 +273,151 @@ func BaseName(path string) string {
 	base := filepath.Base(path)
 	return strings.TrimSuffix(base, filepath.Ext(base))
 }
+
+// StreamHandler 描述流式导出的三个回调。
+//
+// 流式导出的核心保证：磁盘上不产生明文库，内存里不积攒整库消息——
+// 逐页解密、逐条回调，内存占用与库大小无关。
+type StreamHandler struct {
+	// Conversation 在每个会话开始导出时调用一次，用来决定输出文件名和格式。
+	// meta 只带会话元数据，Messages 为空。
+	Conversation func(meta model.Conversation) error
+
+	// Message 每读到一条消息回调一次，调用方应立即写出，不要攒。
+	Message func(m model.Message) error
+
+	// Done 在一个会话读完时调用，用来收尾（关文件、写落款）。
+	Done func(meta model.Conversation, count int) error
+}
+
+// DumpStream 流式导出：边解密边解析边回调，不落明文、不整库载入内存。
+//
+// 与 Dump 的区别只在内存与磁盘：Dump 会先解密成明文库、再用 SQL 把整表读进
+// []Conversation；DumpStream 直接逐页解析 b-tree，磁盘永不出现明文副本，
+// 内存峰值只有"单页 + 单条消息"。代价是会话顺序按库内物理顺序、
+// 且消息按库内顺序（非严格时间序）回调。
+func DumpStream(src string, opt Options, h StreamHandler) error {
+	key := opt.Key
+	if key == "" {
+		if opt.UID == "" {
+			return fmt.Errorf("qqdump: 需要密钥：请给出 Key，或给出 UID 由库头 rand 派生")
+		}
+		head, err := account.ParseHead(src)
+		if err != nil {
+			return fmt.Errorf("qqdump: 读取 %s 的头部失败: %w", src, err)
+		}
+		if head == nil || head.Rand == "" {
+			return fmt.Errorf("qqdump: %s 的头部里没有 rand，无法派生密钥，请直接给出 Key", src)
+		}
+		key = account.DeriveKey(opt.UID, head.Rand)
+	}
+
+	sdb, err := db.OpenEncryptedStream(src, key, opt.Tolerant)
+	if err != nil {
+		return err
+	}
+	defer sdb.Close()
+
+	for _, table := range sdb.Tables() {
+		kind := tableKind(table)
+		if !wantKind(opt.Kinds, kind) {
+			continue
+		}
+
+		var sessions []db.Session
+		serr := sdb.StreamSessions(table, func(s db.Session) error {
+			if !wantPeer(opt.Peers, s.PeerUIN) {
+				return nil
+			}
+			sessions = append(sessions, s)
+			return nil
+		})
+		if serr != nil {
+			if opt.Tolerant {
+				log.Printf("警告: 表 %s 列举会话失败，跳过: %v", table, serr)
+				continue
+			}
+			return serr
+		}
+		sort.SliceStable(sessions, func(i, j int) bool { return sessions[i].PeerUIN < sessions[j].PeerUIN })
+
+		for _, s := range sessions {
+			meta := model.Conversation{
+				ID:      s.ID,
+				PeerUIN: s.PeerUIN,
+				PeerUID: s.PeerUID,
+				Type:    kind,
+				Name:    inferNameFromSession(s, kind),
+			}
+			if h.Conversation != nil {
+				if err := h.Conversation(meta); err != nil {
+					return err
+				}
+			}
+
+			count := 0
+			ferr := sdb.StreamSessionMessages(table, s.PeerUIN, db.Filter{
+				Since: opt.Since,
+				Until: opt.Until,
+				Limit: opt.Limit,
+			}, func(m model.Message) error {
+				count++
+				if h.Message != nil {
+					return h.Message(m)
+				}
+				return nil
+			})
+			if ferr != nil {
+				if opt.Tolerant {
+					log.Printf("警告: 会话 %d（表 %s）读取中断（可能受坏页影响），已导出 %d 条: %v",
+						s.PeerUIN, table, count, ferr)
+				} else {
+					return ferr
+				}
+			}
+			if h.Done != nil {
+				if err := h.Done(meta, count); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// inferNameFromSession 用会话概要里的名字推断展示名，取不到就退回号码。
+func inferNameFromSession(s db.Session, kind int) string {
+	if s.Name != "" {
+		return s.Name
+	}
+	if kind == model.ChatGroup && s.PeerUIN != 0 {
+		return fmt.Sprintf("群 %d", s.PeerUIN)
+	}
+	return ""
+}
+
+// ReplaySession 重新读一遍指定会话并逐条回调，用于一次遍历同时产出多种格式。
+//
+// 它只为这种场景存在：流式导出时，第一个格式是边读边写的，其余格式需要再次
+// 顺序读同一会话。第二次读依旧逐页解密、逐条回调，内存仍与库大小无关。
+func ReplaySession(src string, opt Options, meta model.Conversation, cb func(model.Message) error) error {
+	key := opt.Key
+	if key == "" {
+		return fmt.Errorf("qqdump: ReplaySession 需要 opt.Key（密钥已由调用方解析）")
+	}
+	sdb, err := db.OpenEncryptedStream(src, key, opt.Tolerant)
+	if err != nil {
+		return err
+	}
+	defer sdb.Close()
+
+	table := db.TableC2C
+	if meta.Type == model.ChatGroup {
+		table = db.TableGroup
+	}
+	return sdb.StreamSessionMessages(table, meta.PeerUIN, db.Filter{
+		Since: opt.Since,
+		Until: opt.Until,
+		Limit: opt.Limit,
+	}, cb)
+}

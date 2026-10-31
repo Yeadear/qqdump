@@ -361,3 +361,111 @@ func DecryptNTQQFileTolerant(src, dst, key string) (bad []uint32, err error) {
 	}
 	return bad, nil
 }
+
+// Decrypter 封装一个加密 nt_msg.db 的"按需逐页解密"。
+//
+// 它和 DecryptNTQQFile 不同：不把整个库解密到磁盘，也不整库载入内存，
+// 而是每次只取调用方需要的那一页。这正好对接 SQLite 的随机页访问模型——
+// 读消息时顺着 b-tree 走到哪页才解哪页，因此磁盘上不出现明文副本，
+// 内存里也只有当前页，CPU 也只解密真正被读到的页。
+type Decrypter struct {
+	f          *os.File
+	codec      *sqlcipher.Codec
+	pageSize   int
+	reserve    int
+	headerSize int
+	tolerant   bool
+}
+
+// reserveOf 由 Params 的 HMAC 算法推导每页保留区大小（IV || HMAC 槽）。
+// HMAC_SHA1 → 16+32=48，HMAC_SHA512 → 16+64=80。sqlcipher.Params.reserve()
+// 是包内未导出方法，这里用等价的公开字段重算。
+func reserveOf(p sqlcipher.Params) int {
+	if p.HMAC == sqlcipher.HMACSHA1 {
+		return sqlcipher.IVSize + 32
+	}
+	return sqlcipher.IVSize + 64
+}
+
+// NewDecrypter 打开一个加密的 nt_msg.db 并探测正确的解密参数，但不解密任何页。
+func NewDecrypter(src, key string, tolerant bool) (*Decrypter, error) {
+	if key == "" {
+		return nil, errors.New("cipher: 密钥为空")
+	}
+	in, err := os.Open(src)
+	if err != nil {
+		return nil, err
+	}
+	k, p, err := probeParams(in, key)
+	if err != nil {
+		in.Close()
+		return nil, err
+	}
+	// probeParams 已把指针移到 SQLCipher 负载第 1 页；重新读取 salt 并建 codec。
+	if _, err := in.Seek(HeaderSize, io.SeekStart); err != nil {
+		in.Close()
+		return nil, fmt.Errorf("cipher: 定位到第 1 页失败: %w", err)
+	}
+	page1 := make([]byte, PageSize)
+	if _, err := io.ReadFull(in, page1); err != nil {
+		in.Close()
+		return nil, fmt.Errorf("cipher: 读取第 1 页: %w", err)
+	}
+	salt, err := sqlcipher.FileSalt(page1)
+	if err != nil {
+		in.Close()
+		return nil, err
+	}
+	codec, err := sqlcipher.NewCodec(k, salt, p)
+	if err != nil {
+		in.Close()
+		return nil, err
+	}
+	return &Decrypter{
+		f:          in,
+		codec:      codec,
+		pageSize:   PageSize,
+		reserve:    reserveOf(p),
+		headerSize: HeaderSize,
+		tolerant:   tolerant,
+	}, nil
+}
+
+// Close 释放底层文件句柄。
+func (d *Decrypter) Close() error { return d.f.Close() }
+
+// PageSize 是加密页（含 reserve 尾部）的字节数。
+func (d *Decrypter) PageSize() int { return d.pageSize }
+
+// UsableSize 是每页可被 SQLite 使用的字节数（pageSize - reserve）。
+func (d *Decrypter) UsableSize() int { return d.pageSize - d.reserve }
+
+// ErrCorruptPage 表示某一页 HMAC 校验失败。仅在容错模式下由 DecryptPage 返回，
+// 调用方应跳过该页的 cell 并继续后续页。
+var ErrCorruptPage = errors.New("cipher: 坏页（HMAC 校验失败）")
+
+// DecryptPage 解密第 pgno 页（1-based），返回该页的 SQLite 内容区
+// （已去掉 IV+HMAC 保留尾部）。容错模式下遇到坏页会返回
+// (全零内容, ErrCorruptPage)，由调用方决定如何跳过。
+func (d *Decrypter) DecryptPage(pgno uint32) ([]byte, error) {
+	if pgno == 0 {
+		return nil, fmt.Errorf("cipher: 页号从 1 开始")
+	}
+	off := int64(d.headerSize) + int64(pgno-1)*int64(d.pageSize)
+	buf := make([]byte, d.pageSize)
+	n, err := d.f.ReadAt(buf, off)
+	if err != nil && err != io.EOF {
+		return nil, err
+	}
+	if n != d.pageSize {
+		return nil, fmt.Errorf("cipher: 第 %d 页不足 %d 字节（只有 %d）", pgno, d.pageSize, n)
+	}
+	plain, err := d.codec.Decrypt(pgno, buf)
+	if err != nil {
+		if d.tolerant {
+			return make([]byte, d.UsableSize()), ErrCorruptPage
+		}
+		return nil, err
+	}
+	return plain[:d.UsableSize()], nil
+}
