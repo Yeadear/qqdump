@@ -541,6 +541,7 @@ func cmdDiagnose(args []string) error {
 	d := flagStr(fs, "d", "data", "", "QQ 数据目录")
 	uid := flagStr(fs, "u", "uid", "", "NT UID")
 	master := flagBool(fs, "", "master", false, "打印 sqlite_master 的解析详情（排查用）")
+	scan := flagStr(fs, "", "scan", "", "逐 cell 扫描指定表（c2c_msg_table/group_msg_table），只报告解析失败的行")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -552,6 +553,30 @@ func cmdDiagnose(args []string) error {
 		if err != nil {
 			return err
 		}
+	}
+
+	if scan() != "" {
+		if in() == "" {
+			return fmt.Errorf("diagnose --scan: 需要 -i/--input <nt_msg.db>")
+		}
+		k, err := resolveKey(in(), "", uid())
+		if err != nil {
+			return err
+		}
+		sdb, err := db.OpenEncryptedStream(in(), k, true)
+		if err != nil {
+			return err
+		}
+		defer sdb.Close()
+		for _, t := range sdb.Tables() {
+			if scan() != "all" && t != scan() {
+				continue
+			}
+			if err := sdb.ScanCells(os.Stdout, t); err != nil {
+				return err
+			}
+		}
+		return nil
 	}
 
 	if master() {
