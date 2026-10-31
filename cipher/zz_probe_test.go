@@ -1,10 +1,12 @@
-package cipher
+package cipher_test
 
 import (
 	"fmt"
-	"io"
 	"os"
 	"testing"
+
+	"github.com/Yeadear/qqdump/account"
+	"github.com/Yeadear/qqdump/cipher"
 )
 
 // TestZZHeaderReserve 打印解密后 page 1 文件头里声明的页大小与 reserve，
@@ -16,7 +18,15 @@ func TestZZHeaderReserve(t *testing.T) {
 	if src == "" {
 		t.Skip("设置 QQDUMP_DB 后运行")
 	}
-	d, err := NewDecrypter(src, os.Getenv("QQDUMP_UID"), true)
+	key := os.Getenv("QQDUMP_KEY")
+	if key == "" {
+		head, err := account.ParseHead(src)
+		if err != nil {
+			t.Fatal(err)
+		}
+		key = account.DeriveKey(os.Getenv("QQDUMP_UID"), head.Rand)
+	}
+	d, err := cipher.NewDecrypter(src, key, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -28,5 +38,4 @@ func TestZZHeaderReserve(t *testing.T) {
 	sz := int(p1[16])<<8 | int(p1[17])
 	fmt.Printf("文件头声明 pageSize=%d，代码用 %d；reserve 字节(20)=%d，代码用 %d；页数=%d\n",
 		sz, d.PageSize(), p1[20], d.PageSize()-d.UsableSize(), d.PageCount())
-	_ = io.EOF
 }
