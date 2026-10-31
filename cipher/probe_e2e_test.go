@@ -11,7 +11,12 @@ import (
 
 func makeNTFile(t *testing.T, h sqlcipher.HMACAlgo, iter int) []byte {
 	t.Helper()
-	reserve := 16 + (func() int { if h == sqlcipher.HMACSHA1 { return 32 }; return 64 }())
+	reserve := 16 + (func() int {
+		if h == sqlcipher.HMACSHA1 {
+			return 32
+		}
+		return 64
+	}())
 	page := make([]byte, 4096)
 	copy(page, "SQLite format 3\x00")
 	page[20] = byte(reserve)

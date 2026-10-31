@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -183,15 +184,53 @@ func (s *StreamDB) StreamSessions(table string, cb func(Session) error) error {
 }
 
 // StreamSessionMessages 流式读取某一个会话（按 40030 匹配）的消息，
-// 边扫描边回调，内存里只有当前一条消息。
+// 边扫描边回调，内存里只有"当前窗口 + 单条消息"。
+//
+// 输出按时间升序：b-tree 的物理顺序并不保证时间序（同一会话里 web 端发来的
+// 消息 rowid 可能比手机端更晚却时间更早），所以这里用固定大小的窗口缓冲，
+// 攒满 window 条就排序回调一次，最后一个不满的窗口在结尾回调。这样既保证
+// 顺序，又把内存钉在 window 条消息上，与库大小无关。
 func (s *StreamDB) StreamSessionMessages(table string, peer int64, f Filter, cb func(model.Message) error) error {
+	return s.StreamSessionMessagesWindow(table, peer, f, SortWindow, cb)
+}
+
+// SortWindow 是流式排序窗口的默认大小。窗口越大顺序越准、内存越多；
+// 4096 条大约几 MB，对聊天记录足够（同一会话内时间错位通常只跨几十条）。
+const SortWindow = 4096
+
+// StreamSessionMessagesWindow 是 StreamSessionMessages 的可调窗口版本。
+func (s *StreamDB) StreamSessionMessagesWindow(table string, peer int64, f Filter, window int, cb func(model.Message) error) error {
 	ti, ok := s.tables[table]
 	if !ok {
 		return fmt.Errorf("db: 未知表 %s", table)
 	}
+	if window <= 0 {
+		window = SortWindow
+	}
 	f.PeerUIN = peer
+
+	buf := make([]model.Message, 0, window)
+	flush := func() error {
+		if len(buf) == 0 {
+			return nil
+		}
+		sort.SliceStable(buf, func(i, j int) bool {
+			if buf[i].Timestamp != buf[j].Timestamp {
+				return buf[i].Timestamp < buf[j].Timestamp
+			}
+			return buf[i].ID < buf[j].ID
+		})
+		for _, m := range buf {
+			if err := cb(m); err != nil {
+				return err
+			}
+		}
+		buf = buf[:0]
+		return nil
+	}
+
 	count := 0
-	return s.walkTable(ti.rootpage, func(_ int64, payload []byte) error {
+	err := s.walkTable(ti.rootpage, func(_ int64, payload []byte) error {
 		cols, err := parseRecord(payload)
 		if err != nil {
 			return nil
@@ -205,8 +244,16 @@ func (s *StreamDB) StreamSessionMessages(table string, peer int64, f Filter, cb 
 			return errStopScan
 		}
 		count++
-		return cb(m)
+		buf = append(buf, m)
+		if len(buf) >= window {
+			return flush()
+		}
+		return nil
 	})
+	if err != nil && !errors.Is(err, errStopScan) {
+		return err
+	}
+	return flush()
 }
 
 // errStopScan 由回调返回以提前结束遍历（达到 Limit 时）。

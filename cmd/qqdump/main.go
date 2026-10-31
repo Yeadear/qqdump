@@ -431,127 +431,100 @@ func firstFailed(js []exportJob) string {
 // exportStream 流式导出：不落明文库，逐页解密、逐条消息写出。
 // 返回（会话数, 消息数, error）。
 //
-// JSON 在流式模式下按会话分文件（conversations/<会话>.json），
-// 因为把所有会话汇成一个大 JSON 数组必然要把全部消息留在内存里或反复回写，
-// 与"流式"的初衷相违。
+// 一个会话同时打开所请求的全部格式（html / md / json）的 writer，一次遍历
+// 全部写完，因此不会为每种格式重复解密。JSON 在流式模式下按会话分文件
+// （conversations/<会话>.json）：把所有会话汇成一个大 JSON 数组必须把全部
+// 消息留在内存里，与"流式"的初衷相违。
 func exportStream(src, dir string, opt qqdump.Options, formats map[string]bool) (int, int, error) {
 	if opt.Key == "" {
 		return 0, 0, fmt.Errorf("流式导出需要密钥")
 	}
+
+	// 每个会话的输出目标：格式 → (文件, 流式 writer)。
+	type sink struct {
+		f  *os.File
+		cs *export.ConvStream
+	}
 	var (
-		convs  int
-		msgs   int
-		cur    *os.File
-		curCS  *export.ConvStream
-		curMeta model.Conversation
-		closeCur = func() error {
-			if curCS != nil {
-				if err := curCS.Close(); err != nil {
-					cur.Close()
-					curCS = nil
-					return err
+		convs      int
+		msgs       int
+		sinks      []sink
+		closeSinks = func() error {
+			var first error
+			for _, s := range sinks {
+				if s.cs != nil {
+					if err := s.cs.Close(); err != nil && first == nil {
+						first = err
+					}
 				}
-				curCS = nil
+				if s.f != nil {
+					if err := s.f.Close(); err != nil && first == nil {
+						first = err
+					}
+				}
 			}
-			if cur != nil {
-				err := cur.Close()
-				cur = nil
-				return err
-			}
-			return nil
+			sinks = nil
+			return first
 		}
 	)
 
-	// 流式模式下 html/md 每会话一个文件；json 分片放在 conversations/ 目录。
 	if formats["json"] {
 		if err := os.MkdirAll(filepath.Join(dir, "conversations"), 0o755); err != nil {
 			return 0, 0, err
 		}
 	}
 
-	// 选择主格式（每会话写文件的那个）。
-	primary := ""
-	switch {
-	case formats["html"]:
-		primary = "html"
-	case formats["md"]:
-		primary = "markdown"
-	case formats["json"]:
-		primary = "json"
-	}
-
 	h := qqdump.StreamHandler{
 		Conversation: func(meta model.Conversation) error {
-			if err := closeCur(); err != nil {
+			if err := closeSinks(); err != nil {
 				return err
 			}
-			curMeta = meta
 			convs++
-			if primary == "" {
+			name := export.FileName(meta)
+			open := func(format, path string) error {
+				f, err := os.Create(path)
+				if err != nil {
+					return err
+				}
+				sinks = append(sinks, sink{f: f, cs: export.NewConvStream(format, f, meta)})
 				return nil
 			}
-			name := export.FileName(meta)
-			ext := map[string]string{"html": ".html", "markdown": ".md", "json": ".json"}[primary]
-			sub := dir
-			if primary == "json" {
-				sub = filepath.Join(dir, "conversations")
+			if formats["html"] {
+				if err := open("html", filepath.Join(dir, name+".html")); err != nil {
+					return err
+				}
 			}
-			f, err := os.Create(filepath.Join(sub, name+ext))
-			if err != nil {
-				return err
+			if formats["md"] {
+				if err := open("markdown", filepath.Join(dir, name+".md")); err != nil {
+					return err
+				}
 			}
-			cur = f
-			curCS = export.NewConvStream(primary, f, meta)
+			if formats["json"] {
+				if err := open("json", filepath.Join(dir, "conversations", name+".json")); err != nil {
+					return err
+				}
+			}
 			return nil
 		},
 		Message: func(m model.Message) error {
 			msgs++
-			if curCS == nil {
-				return nil
-			}
-			return curCS.Write(m)
-		},
-		Done: func(_ model.Conversation, _ int) error {
-			// 多格式时补写次要格式（会再读一遍该会话，但内存仍恒定）
-			if err := closeCur(); err != nil {
-				return err
-			}
-			for _, f := range []string{"html", "md"} {
-				if !formats[f] || f == primary {
-					continue
-				}
-				want := "html"
-				ext := ".html"
-				if f == "md" {
-					want = "markdown"
-					ext = ".md"
-				}
-				p := filepath.Join(dir, export.FileName(curMeta)+ext)
-				file, err := os.Create(p)
-				if err != nil {
+			for _, s := range sinks {
+				if err := s.cs.Write(m); err != nil {
 					return err
-				}
-				cs := export.NewConvStream(want, file, curMeta)
-				rerr := qqdump.ReplaySession(src, opt, curMeta, cs.Write)
-				if cerr := cs.Close(); cerr != nil && rerr == nil {
-					rerr = cerr
-				}
-				if err := file.Close(); err != nil && rerr == nil {
-					rerr = err
-				}
-				if rerr != nil {
-					return rerr
 				}
 			}
 			return nil
 		},
+		Done: func(_ model.Conversation, _ int) error {
+			return closeSinks()
+		},
 	}
 
 	if err := qqdump.DumpStream(src, opt, h); err != nil {
-		closeCur()
+		closeSinks()
 		return convs, msgs, err
 	}
-	if err := closeCur(); err != nil {
+	if err := closeSinks(); err != nil {
 		return convs, msgs, err
 	}
 	return convs, msgs, nil

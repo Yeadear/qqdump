@@ -14,14 +14,14 @@ import (
 //
 // 三种格式（json / markdown / html）各自包裹成合法的自包含文档。
 type ConvStream struct {
-	format   string
-	w        io.Writer
-	meta     model.Conversation
-	enc      *json.Encoder
-	first    bool
-	count    int
-	firstTS  int64
-	lastTS   int64
+	format     string
+	w          io.Writer
+	meta       model.Conversation
+	enc        *json.Encoder
+	first      bool
+	count      int
+	firstTS    int64
+	lastTS     int64
 	lastMDDate string // Markdown 按日期分组时记住上一个日期
 }
 
