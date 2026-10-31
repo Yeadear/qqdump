@@ -18,6 +18,7 @@ package qqdump
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -52,6 +53,11 @@ type Options struct {
 
 	// Peers 限定只导出这些会话（私聊填对方 QQ 号，群聊填群号）。为空表示全部。
 	Peers []int64
+
+	// Tolerant 开启时，解密遇到个别坏页会跳过（写入零页占位）而非整体失败，
+	// 读取阶段某张表/某个会话因坏页读不出时也会跳过而非整体失败——尽力导出
+	// 其余数据。适用于源 db 仅有零散坏页的场景。
+	Tolerant bool
 }
 
 // Dump 一步完成"解密 → 读取 → 组装会话"。
@@ -88,8 +94,18 @@ func Dump(src string, opt Options) ([]model.Conversation, error) {
 		defer os.Remove(tmp)
 	}
 
-	if err := cipher.DecryptNTQQFile(src, plain, key); err != nil {
-		return nil, err
+	if opt.Tolerant {
+		bad, derr := cipher.DecryptNTQQFileTolerant(src, plain, key)
+		if derr != nil {
+			return nil, derr
+		}
+		if len(bad) > 0 {
+			log.Printf("警告: %s 解密时有 %d 个坏页（已跳过占位）：%v", src, len(bad), bad)
+		}
+	} else {
+		if derr := cipher.DecryptNTQQFile(src, plain, key); derr != nil {
+			return nil, derr
+		}
 	}
 	return Load(plain, opt)
 }
@@ -114,6 +130,10 @@ func Load(plainPath string, opt Options) ([]model.Conversation, error) {
 
 		sessions, err := d.Sessions(table)
 		if err != nil {
+			if opt.Tolerant {
+				log.Printf("警告: 表 %s 读取会话列表失败（可能受坏页影响），跳过该表: %v", table, err)
+				continue
+			}
 			return nil, err
 		}
 		for _, s := range sessions {
@@ -127,6 +147,10 @@ func Load(plainPath string, opt Options) ([]model.Conversation, error) {
 				Limit:   opt.Limit,
 			})
 			if err != nil {
+				if opt.Tolerant {
+					log.Printf("警告: 会话 %d（表 %s）读取失败（可能受坏页影响），跳过: %v", s.PeerUIN, table, err)
+					continue
+				}
 				return nil, err
 			}
 			if len(msgs) == 0 {

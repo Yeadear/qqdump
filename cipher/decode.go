@@ -227,3 +227,137 @@ func probeParams(in *os.File, key string) (sqlcipher.Key, sqlcipher.Params, erro
 	}
 	return sqlcipher.Key{}, sqlcipher.Params{}, fmt.Errorf("cipher: 密钥不正确或文件已损坏: %w", lastErr)
 }
+
+// DiagnoseNTQQ 与 DecryptNTQQFile 同样的参数试探后，逐页调用 Codec.Decrypt
+// 统计 HMAC 校验失败的页码。用于判断源 db 是单页损坏还是整段损坏——
+// 单页可容错跳过，整段（如文件从某偏移起错位）则需要换一份干净的 db。
+func DiagnoseNTQQ(src, key string) (bad []uint32, err error) {
+	if key == "" {
+		return nil, errors.New("cipher: 密钥为空")
+	}
+	in, err := os.Open(src)
+	if err != nil {
+		return nil, err
+	}
+	defer in.Close()
+
+	k, p, err := probeParams(in, key)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := in.Seek(HeaderSize, io.SeekStart); err != nil {
+		return nil, fmt.Errorf("cipher: 定位到第 1 页失败: %w", err)
+	}
+	page1 := make([]byte, PageSize)
+	if _, err := io.ReadFull(in, page1); err != nil {
+		return nil, fmt.Errorf("cipher: 读取第 1 页: %w", err)
+	}
+	salt, err := sqlcipher.FileSalt(page1)
+	if err != nil {
+		return nil, err
+	}
+	codec, err := sqlcipher.NewCodec(k, salt, p)
+	if err != nil {
+		return nil, err
+	}
+
+	if _, err := in.Seek(HeaderSize, io.SeekStart); err != nil {
+		return nil, err
+	}
+	page := make([]byte, PageSize)
+	var pgno uint32 = 1
+	for {
+		n, rerr := io.ReadFull(in, page)
+		if errors.Is(rerr, io.EOF) {
+			break
+		}
+		if rerr != nil {
+			return bad, fmt.Errorf("cipher: 读取第 %d 页: %w", pgno, rerr)
+		}
+		if n != len(page) {
+			break
+		}
+		if _, derr := codec.Decrypt(pgno, page); derr != nil {
+			bad = append(bad, pgno)
+		}
+		pgno++
+	}
+	return bad, nil
+}
+
+// DecryptNTQQFileTolerant 与 DecryptNTQQFile 逻辑相同，但某页 HMAC 校验失败时
+// 不再整体失败，而是写入等长的零页占位（保持页对齐），并把这些坏页页码返回。
+// 适用于源 db 仅有个别页损坏、希望尽力导出其余数据的场景。坏页所在的 b-tree
+// 子树在随后的读取阶段仍可能读不出，调用方应做好逐表/逐会话容错。
+func DecryptNTQQFileTolerant(src, dst, key string) (bad []uint32, err error) {
+	if key == "" {
+		return nil, errors.New("cipher: 密钥为空")
+	}
+	in, err := os.Open(src)
+	if err != nil {
+		return nil, err
+	}
+	defer in.Close()
+
+	k, p, err := probeParams(in, key)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := in.Seek(HeaderSize, io.SeekStart); err != nil {
+		return nil, fmt.Errorf("cipher: 定位到 SQLCipher 负载失败: %w", err)
+	}
+	page1 := make([]byte, PageSize)
+	if _, err := io.ReadFull(in, page1); err != nil {
+		return nil, fmt.Errorf("cipher: 读取第 1 页: %w", err)
+	}
+	salt, err := sqlcipher.FileSalt(page1)
+	if err != nil {
+		return nil, err
+	}
+	codec, err := sqlcipher.NewCodec(k, salt, p)
+	if err != nil {
+		return nil, err
+	}
+
+	out, err := os.Create(dst)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		cerr := out.Close()
+		if err == nil {
+			err = cerr
+		}
+	}()
+
+	page := make([]byte, PageSize)
+	var pgno uint32 = 1
+	for {
+		n, rerr := io.ReadFull(in, page)
+		if errors.Is(rerr, io.EOF) {
+			break
+		}
+		if rerr != nil {
+			return bad, fmt.Errorf("cipher: 读取第 %d 页: %w", pgno, rerr)
+		}
+		if n != len(page) {
+			if _, werr := out.Write(page[:n]); werr != nil {
+				return bad, werr
+			}
+			break
+		}
+		plain, derr := codec.Decrypt(pgno, page)
+		if derr != nil {
+			bad = append(bad, pgno)
+			if _, werr := out.Write(make([]byte, PageSize)); werr != nil {
+				return bad, werr
+			}
+		} else {
+			if _, werr := out.Write(plain); werr != nil {
+				return bad, werr
+			}
+		}
+		pgno++
+	}
+	return bad, nil
+}

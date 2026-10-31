@@ -26,6 +26,7 @@ import (
 
 	"github.com/Yeadear/qqdump"
 	"github.com/Yeadear/qqdump/account"
+	"github.com/Yeadear/qqdump/cipher"
 	"github.com/Yeadear/qqdump/export"
 	"github.com/Yeadear/qqdump/model"
 )
@@ -163,6 +164,8 @@ func main() {
 		err = cmdDecrypt(os.Args[2:])
 	case "export":
 		err = cmdExport(os.Args[2:])
+	case "diagnose":
+		err = cmdDiagnose(os.Args[2:])
 	case "help", "-h", "--help":
 		fmt.Print(usageText)
 		return
@@ -316,6 +319,7 @@ func cmdExport(args []string) error {
 	until := flagStr(fs, "", "until", "", "结束时间")
 	limit := flagInt(fs, "n", "limit", 0, "每个会话最多条数")
 	keep := flagBool(fs, "", "keep", false, "保留明文库")
+	tolerant := flagBool(fs, "", "tolerant", true, "解密遇到坏页时跳过并尽力导出其余数据")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -364,7 +368,7 @@ func cmdExport(args []string) error {
 			}
 		}
 
-		opt := qqdump.Options{Key: j.key, Since: sinceTS, Until: untilTS, Limit: limit()}
+		opt := qqdump.Options{Key: j.key, Since: sinceTS, Until: untilTS, Limit: limit(), Tolerant: tolerant()}
 		if kinds() != "" {
 			opt.Kinds = strings.Split(kinds(), ",")
 		}
@@ -406,6 +410,58 @@ func firstFailed(js []exportJob) string {
 		return ""
 	}
 	return js[0].db
+}
+
+// ---- diagnose ----
+
+// cmdDiagnose 对每个账号逐页校验 HMAC，统计坏页分布，判断源 db 是单页损坏
+// 还是整段损坏（决定能否容错导出）。不写出任何文件，只读不写。
+func cmdDiagnose(args []string) error {
+	fs := flag.NewFlagSet("diagnose", flag.ContinueOnError)
+	in := flagStr(fs, "i", "input", "", "只诊断这一个 nt_msg.db")
+	d := flagStr(fs, "d", "data", "", "QQ 数据目录")
+	uid := flagStr(fs, "u", "uid", "", "NT UID")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	root := ""
+	if in() == "" {
+		var err error
+		root, err = resolveDataDir(dataDir(d()))
+		if err != nil {
+			return err
+		}
+	}
+
+	jobs, err := collectJobs(in(), root, "", uid(), "")
+	if err != nil {
+		return err
+	}
+	if len(jobs) == 0 {
+		return fmt.Errorf("diagnose: 没有可诊断的数据库")
+	}
+
+	for _, j := range jobs {
+		bad, derr := cipher.DiagnoseNTQQ(j.db, j.key)
+		if derr != nil {
+			log.Printf("%s: 诊断失败: %v", j.db, derr)
+			continue
+		}
+		if len(bad) == 0 {
+			log.Printf("%s: 无坏页（%d 页全部 HMAC 校验通过）", j.db, 0)
+			continue
+		}
+		log.Printf("%s: 共 %d 个坏页", j.db, len(bad))
+		n := len(bad)
+		if n > 30 {
+			n = 30
+		}
+		log.Printf("  坏页（前 %d）: %v", n, bad[:n])
+		// 给出最小/最大坏页，方便判断是否从某处起整段损坏
+		log.Printf("  坏页范围: 最小 %d / 最大 %d / 总页数约 %d", bad[0], bad[len(bad)-1], bad[len(bad)-1])
+	}
+	return nil
 }
 
 // ---- 共用 ----
