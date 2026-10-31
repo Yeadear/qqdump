@@ -374,6 +374,7 @@ type Decrypter struct {
 	pageSize   int
 	reserve    int
 	headerSize int
+	pages      uint32 // 文件里实际存在的页数，用于挡住越界页号
 	tolerant   bool
 }
 
@@ -421,12 +422,22 @@ func NewDecrypter(src, key string, tolerant bool) (*Decrypter, error) {
 		in.Close()
 		return nil, err
 	}
+	st, err := in.Stat()
+	if err != nil {
+		in.Close()
+		return nil, err
+	}
+	pages := uint32(0)
+	if size := st.Size() - HeaderSize; size > 0 {
+		pages = uint32(size / PageSize)
+	}
 	return &Decrypter{
 		f:          in,
 		codec:      codec,
 		pageSize:   PageSize,
 		reserve:    reserveOf(p),
 		headerSize: HeaderSize,
+		pages:      pages,
 		tolerant:   tolerant,
 	}, nil
 }
@@ -437,12 +448,21 @@ func (d *Decrypter) Close() error { return d.f.Close() }
 // PageSize 是加密页（含 reserve 尾部）的字节数。
 func (d *Decrypter) PageSize() int { return d.pageSize }
 
+// PageCount 是文件里实际存在的页数。调用方在跟着 b-tree 指针走时可以先用它
+// 挡掉越界页号——页号一旦越界说明指针被读坏了，此时返回 sql.ErrNoRows 之类的
+// 错误没有意义，直接跳过更稳。
+func (d *Decrypter) PageCount() uint32 { return d.pages }
+
 // UsableSize 是每页可被 SQLite 使用的字节数（pageSize - reserve）。
 func (d *Decrypter) UsableSize() int { return d.pageSize - d.reserve }
 
 // ErrCorruptPage 表示某一页 HMAC 校验失败。仅在容错模式下由 DecryptPage 返回，
 // 调用方应跳过该页的 cell 并继续后续页。
 var ErrCorruptPage = errors.New("cipher: 坏页（HMAC 校验失败）")
+
+// ErrPageOutOfRange 表示页号超出了文件实际页数。正常库里不会出现，
+// 一旦出现必然是上层把指针读坏了（或文件被截断）。
+var ErrPageOutOfRange = errors.New("cipher: 页号超出文件范围")
 
 // DecryptPage 解密第 pgno 页（1-based），返回该页的 SQLite 内容区
 // （已去掉 IV+HMAC 保留尾部）。容错模式下遇到坏页会返回
@@ -451,6 +471,9 @@ func (d *Decrypter) DecryptPage(pgno uint32) ([]byte, error) {
 	if pgno == 0 {
 		return nil, fmt.Errorf("cipher: 页号从 1 开始")
 	}
+	if d.pages > 0 && pgno > d.pages {
+		return nil, fmt.Errorf("%w: 第 %d 页，文件只有 %d 页", ErrPageOutOfRange, pgno, d.pages)
+	}
 	off := int64(d.headerSize) + int64(pgno-1)*int64(d.pageSize)
 	buf := make([]byte, d.pageSize)
 	n, err := d.f.ReadAt(buf, off)
@@ -458,7 +481,8 @@ func (d *Decrypter) DecryptPage(pgno uint32) ([]byte, error) {
 		return nil, err
 	}
 	if n != d.pageSize {
-		return nil, fmt.Errorf("cipher: 第 %d 页不足 %d 字节（只有 %d）", pgno, d.pageSize, n)
+		return nil, fmt.Errorf("%w: 第 %d 页不足 %d 字节（只有 %d）",
+			ErrPageOutOfRange, pgno, d.pageSize, n)
 	}
 	plain, err := d.codec.Decrypt(pgno, buf)
 	if err != nil {

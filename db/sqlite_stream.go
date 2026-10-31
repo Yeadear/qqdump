@@ -28,6 +28,7 @@ type StreamDB struct {
 	dec      pageReader
 	usable   int
 	pageSize int
+	pages    uint32 // 文件页数，用于挡越界指针；0 表示未知
 	tables   map[string]tableInfo
 }
 
@@ -45,7 +46,7 @@ func OpenEncryptedStream(src, key string, tolerant bool) (*StreamDB, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &StreamDB{dec: dec, usable: dec.UsableSize(), pageSize: dec.PageSize()}
+	s := &StreamDB{dec: dec, usable: dec.UsableSize(), pageSize: dec.PageSize(), pages: dec.PageCount()}
 	if err := s.probe(); err != nil {
 		dec.Close()
 		return nil, err
@@ -266,9 +267,14 @@ var errStopScan = errors.New("db: 扫描结束")
 // walkTable 遍历一个表 b-tree（从 root 页开始），对每一个 leaf cell 调用 cb。
 func (s *StreamDB) walkTable(root uint32, cb func(rowid int64, payload []byte) error) error {
 	q := []uint32{root}
+	visited := make(map[uint32]bool, 64)
 	for len(q) > 0 {
 		pgno := q[0]
 		q = q[1:]
+		if visited[pgno] {
+			continue // 指针读坏时可能自指，防死循环
+		}
+		visited[pgno] = true
 		if err := s.walkPage(pgno, &q, cb); err != nil {
 			if errors.Is(err, errStopScan) {
 				return nil
@@ -279,11 +285,14 @@ func (s *StreamDB) walkTable(root uint32, cb func(rowid int64, payload []byte) e
 	return nil
 }
 
+// walkPage 解密并解析一页；interior 页把子页号追加到 q，leaf 页逐个回调。
 func (s *StreamDB) walkPage(pgno uint32, q *[]uint32, cb func(int64, []byte) error) error {
 	content, err := s.dec.DecryptPage(pgno)
 	if err != nil {
-		if errors.Is(err, cipher.ErrCorruptPage) {
-			return nil // 坏页跳过，继续其它页
+		// 坏页（HMAC 校验失败）或越界页号都只影响一条子树，跳过继续，
+		// 否则一格损坏就能让整张表读不出来。
+		if errors.Is(err, cipher.ErrCorruptPage) || errors.Is(err, cipher.ErrPageOutOfRange) {
+			return nil
 		}
 		return err
 	}
@@ -341,7 +350,9 @@ func (s *StreamDB) walkLeaf(content []byte, hdr int, cb func(int64, []byte) erro
 
 func (s *StreamDB) walkInterior(content []byte, hdr int, q *[]uint32, cb func(int64, []byte) error) error {
 	nCells := int(binary.BigEndian.Uint16(content[hdr+3 : hdr+5]))
-	if 12+2*nCells > len(content) {
+	// 页头 12 字节（interior 比 leaf 多 4 字节的最右子页指针），
+	// 之后是 nCells 个 2 字节 cell 指针。边界要带上 hdr——page 1 的 hdr=100。
+	if hdr+12+2*nCells > len(content) {
 		return nil
 	}
 	rightPtr := binary.BigEndian.Uint32(content[hdr+8 : hdr+12])
@@ -351,13 +362,21 @@ func (s *StreamDB) walkInterior(content []byte, hdr int, q *[]uint32, cb func(in
 		if ptr < hdr || ptr+4 > len(content) {
 			continue
 		}
-		child := binary.BigEndian.Uint32(content[ptr : ptr+4])
-		*q = append(*q, child)
+		if child := binary.BigEndian.Uint32(content[ptr : ptr+4]); s.validPage(child) {
+			*q = append(*q, child)
+		}
 	}
-	if rightPtr != 0 {
+	if rightPtr != 0 && s.validPage(rightPtr) {
 		*q = append(*q, rightPtr)
 	}
 	return nil
+}
+
+// validPage 挡住越界页号。b-tree 指针被读坏时会得到天文数字（如 2.1e9），
+// 若直接拿去解密只会得到"页不足 4096 字节"的误导性报错，不如就地丢弃。
+// 页数未知（0）时不设限，交给底层 IO 判断。
+func (s *StreamDB) validPage(pgno uint32) bool {
+	return pgno != 0 && (s.pages == 0 || pgno <= s.pages)
 }
 
 // localPayload 取出一条 record 的完整 payload，处理 overflow 链。

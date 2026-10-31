@@ -312,3 +312,94 @@ func TestLeafCellOffsets(t *testing.T) {
 		t.Fatalf("page1 cell 解析 = %v", got)
 	}
 }
+
+// buildPageInto 在 page 的 [hdr, len(page)) 区间内摆放 interior cell。
+// page 可以是整页（hdr=0），也可以是 page 1（前 100 字节已被文件头占用）。
+// cell = childPtr(4) + rowid(varint)。
+func buildPageInto(page []byte, hdr int, children []uint32, right uint32) []byte {
+	page[hdr] = 0x05 // interior table
+	binary.BigEndian.PutUint32(page[hdr+8:], right)
+	off := len(page)
+	ptrs := make([]uint16, len(children))
+	for i := len(children) - 1; i >= 0; i-- {
+		cell := make([]byte, 4)
+		binary.BigEndian.PutUint32(cell, children[i])
+		cell = append(cell, encVarint(uint64(i+1))...)
+		off -= len(cell)
+		copy(page[off:], cell)
+		ptrs[i] = uint16(off)
+	}
+	binary.BigEndian.PutUint16(page[hdr+3:], uint16(len(children)))
+	for i, p := range ptrs {
+		binary.BigEndian.PutUint16(page[hdr+12+2*i:], p)
+	}
+	return page
+}
+
+// buildInteriorPage 造一个独立（非 page 1）的 interior table 页。
+func buildInteriorPage(usable int, children []uint32, right uint32) []byte {
+	return buildPageInto(make([]byte, usable), 0, children, right)
+}
+
+// TestWalkInteriorPage1 覆盖 page 1 是 interior 页的情形：cell 指针从 hdr+12
+// 开始（不是 leaf 的 hdr+8），子页号要能正确取出并继续遍历。
+// 真实 nt_msg.db 的 page 1 就是 interior——旧实现按 leaf 偏移读，会拿到垃圾。
+func TestWalkInteriorPage1(t *testing.T) {
+	U := 512
+	p1 := make([]byte, U)
+	copy(p1, "SQLite format 3\x00")
+	buildPageInto(p1, 100, []uint32{2}, 3)
+
+	recs := func(name string) [][]byte { return [][]byte{makeRecord(name, 1)} }
+	fr := &fakeReader{pages: map[uint32][]byte{
+		1: p1,
+		2: buildLeafPage(U, 0, recs("from_left")),
+		3: buildLeafPage(U, 0, recs("from_right")),
+	}, usable: U}
+	s := &StreamDB{dec: fr, usable: U, pages: 3, tables: map[string]tableInfo{}}
+
+	var got []string
+	if err := s.walkTable(1, func(_ int64, payload []byte) error {
+		cols, err := parseRecord(payload)
+		if err != nil {
+			return err
+		}
+		got = append(got, cols[0].(string))
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0] != "from_left" || got[1] != "from_right" {
+		t.Fatalf("interior page1 遍历 = %v, want [from_left from_right]", got)
+	}
+}
+
+// TestWalkInteriorDropsBadChild 验证越界子页号被丢弃，而不是拿去解密。
+// 这是大库上真实出现过的故障形态：指针读错得到 2.1e9 之类的页号。
+func TestWalkInteriorDropsBadChild(t *testing.T) {
+	U := 512
+	// root 页 1：一个正常子页 + 一个坏指针；最右子页也故意给个越界值。
+	p1 := make([]byte, U)
+	copy(p1, "SQLite format 3\x00")
+	buildPageInto(p1, 100, []uint32{2, 2185409704}, 3999999999)
+	fr := &fakeReader{pages: map[uint32][]byte{
+		1: p1,
+		2: buildLeafPage(U, 0, [][]byte{makeRecord("ok", 1)}),
+	}, usable: U}
+	s := &StreamDB{dec: fr, usable: U, pages: 2}
+
+	var got []string
+	if err := s.walkTable(1, func(_ int64, payload []byte) error {
+		cols, err := parseRecord(payload)
+		if err != nil {
+			return err
+		}
+		got = append(got, cols[0].(string))
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0] != "ok" {
+		t.Fatalf("越界子页应被跳过，实得 %v", got)
+	}
+}
