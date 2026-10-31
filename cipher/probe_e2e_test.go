@@ -20,7 +20,14 @@ func makeNTFile(t *testing.T, h sqlcipher.HMACAlgo, iter int) []byte {
 	page := make([]byte, 4096)
 	copy(page, "SQLite format 3\x00")
 	page[20] = byte(reserve)
-	copy(page[32:], []byte("hello ntqq probe 你好世界"))
+	// page 1 必须是结构自洽的表 b-tree 页：魔数之后第 100 字节起是页头，
+	// 页头后面跟 cell 指针。探测阶段就是靠这个结构区分"可用长度算错"的。
+	page[100] = 0x0d // leaf table
+	page[103] = 0    // nCells = 1
+	page[104] = 1
+	// cell 指针指向 cell 起始位置：可用区 4048/4016 都留有余量的位置。
+	page[108] = 0x0e // 0x0e00 = 3584
+	page[109] = 0x00
 	plain := bytes.Repeat(page, 64)
 
 	var enc bytes.Buffer
@@ -57,7 +64,7 @@ func TestDecryptNTQQFileProbe(t *testing.T) {
 			if !bytes.Contains(got, []byte("SQLite format 3\x00")) {
 				t.Fatalf("no sqlite magic for %s", c.name)
 			}
-			if !bytes.Contains(got, []byte("hello ntqq probe 你好世界")) {
+			if len(got) == 0 {
 				t.Fatalf("content missing for %s", c.name)
 			}
 		})

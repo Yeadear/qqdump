@@ -215,7 +215,16 @@ func probeParams(in *os.File, key string) (sqlcipher.Key, sqlcipher.Params, erro
 					lastErr = err
 					continue
 				}
-				if bytes.HasPrefix(plain, sqliteMagic) {
+				// 魔数只能证明密钥对、算法能解出 page 1，不能证明可用长度算对了：
+				// HMAC_SHA1(reserve 48) 与 HMAC_SHA512(reserve 80) 用的是同一把页密
+				// 钥，都能解出开头的 "SQLite format 3"。选错会让每页可用字节数多出
+				// 32，minLocal/maxLocal 跟着错，超长 payload 的 overflow 起点就落到
+				// 页外（真机 6.6GB 库就是这样整表读不出来）。
+				//
+				// 判据是 page 1 的结构是否自洽：按该可用长度解析 b-tree 页头，所有
+				// cell 指针都必须指向页内的合法位置。算错时留出的尾部会把 cell 区
+				// 截断，指针必然越界。
+				if bytes.HasPrefix(plain, sqliteMagic) && page1SelfConsistent(plain, p) {
 					return c, p, nil
 				}
 				lastErr = sqlcipher.ErrKey
@@ -226,6 +235,55 @@ func probeParams(in *os.File, key string) (sqlcipher.Key, sqlcipher.Params, erro
 		lastErr = sqlcipher.ErrKey
 	}
 	return sqlcipher.Key{}, sqlcipher.Params{}, fmt.Errorf("cipher: 密钥不正确或文件已损坏: %w", lastErr)
+}
+
+// usableOf 返回给定参数下每页真正可用的字节数（页大小减去 IV+HMAC 保留区）。
+func usableOf(p sqlcipher.Params) int {
+	size := p.PageSize
+	if size == 0 {
+		size = PageSize
+	}
+	return size - reserveOf(p)
+}
+
+// page1SelfConsistent 检查解密后的 page 1 在给定可用长度下是否结构自洽。
+//
+// page 1 的 SQLite 页头位于第 100 字节，页头后紧跟 nCells 个 2 字节 cell 指针；
+// 每个指针都必须落在 [页头区尾, 可用长度) 之内——这是所有合法库都成立的约束。
+// 若把可用长度算大了，真实 cell 区会被认为还有空余，但尾部实际是别的数据，
+// 指针往往落到可用区之外，于是被这里判掉。
+func page1SelfConsistent(plain []byte, p sqlcipher.Params) bool {
+	usable := usableOf(p)
+	if usable <= 0 || usable > len(plain) {
+		return false
+	}
+	const hdr = 100
+	if usable < hdr+8 {
+		return false
+	}
+	pageType := plain[hdr]
+	if pageType != 0x0d && pageType != 0x05 && pageType != 0x0a && pageType != 0x02 {
+		return false
+	}
+	nCells := int(plain[hdr+3])<<8 | int(plain[hdr+4])
+	hdrLen := 8
+	if pageType == 0x05 || pageType == 0x02 {
+		hdrLen = 12
+	}
+	if hdr+hdrLen+2*nCells > usable {
+		return false
+	}
+	if nCells == 0 {
+		return true
+	}
+	for i := 0; i < nCells; i++ {
+		off := hdr + hdrLen + 2*i
+		ptr := int(plain[off])<<8 | int(plain[off+1])
+		if ptr < hdr+hdrLen+2*nCells || ptr >= usable {
+			return false
+		}
+	}
+	return true
 }
 
 // DiagnoseNTQQ 与 DecryptNTQQFile 同样的参数试探后，逐页调用 Codec.Decrypt
