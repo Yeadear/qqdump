@@ -1,16 +1,13 @@
 // Package account 定位 QQ NT 的消息数据库并算出它的密钥。
 //
-// 安卓（NTQQ）上的聊天数据库位于
+// 安卓（NTQQ）的消息库路径是固定的：
 //
-//	/data/data/com.tencent.mobileqq/databases/nt_db/nt_qq_{hash}/nt_msg.db
+//	/data/user/0/com.tencent.mobileqq/databases/nt_db/nt_qq_{hash}/nt_msg.db
 //
-// 其中 hash = md5( md5(uid) + "nt_kernel" )，uid 来自同一 QQ 数据目录下的
-//
-//	files/uid/{uin}###{uid}
-//
-// root 直取、adb pull、用户自己拷贝出来的目录，落到磁盘上都是同一套布局，
-// 所以三种数据来源统一为同一种操作：给定一个根路径，找出所有 nt_msg.db
-// 并算出各自密钥。
+// 所以这里不做任何磁盘遍历——只按已知布局拼路径、检查存在性。给一个根路径
+// （Android 根 /、QQ 数据目录、nt_db 目录，或 adb pull 出来的任意一层），
+// 直接解析到 nt_db，再列出其中每个 nt_qq_{hash} 下的 nt_msg.db。这样无论
+// 设备上有多少文件，耗时都是常数级。
 //
 // 每个 nt_msg.db 前面有 1024 字节自定义头。"QQ_NT DB" 标记之后是一个
 // 长度前缀 + 一段 Protobuf，形如
@@ -20,7 +17,8 @@
 //	field 4 → HMAC 算法（如 HMAC_SHA1）
 //
 // 数据库密钥是 md5( md5(uid) + rand )，32 位 hex 字符串，作为 SQLCipher 的
-// passphrase 使用。
+// passphrase 使用。uid 来自同一数据目录下的 files/uid/{uin}###{uid}；拿不到
+// uid 时库照样能列出（含 rand），只是算不出密钥，需要调用方另行提供。
 package account
 
 import (
@@ -28,6 +26,7 @@ import (
 	"crypto/md5" // #nosec G501 -- QQ NT 的密钥算法就是 MD5，无法替换
 	"encoding/binary"
 	"encoding/hex"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -51,10 +50,20 @@ const (
 	fieldHMAC    = 4
 )
 
+// QQ 数据目录下的固定子路径。
+const (
+	pkgName     = "com.tencent.mobileqq" // QQ 包名
+	databasesEl = "databases"            // QQ 数据目录/databases
+	ntDBSubdir  = "nt_db"                // databases/nt_db
+	ntDBPrefix  = "nt_qq_"               // 账号目录 nt_qq_{hash}
+	uidDirEl    = "files"                // QQ 数据目录/files/uid
+	uidSubEl    = "uid"
+)
+
 // DBInfo 是一个找到的（仍是加密的）消息数据库。
 type DBInfo struct {
 	Path    string    // nt_msg.db 的完整路径
-	Account string    // 路径里的 nt_qq_{hash} 账号哈希，没有则为空
+	Account string    // 所在目录名 nt_qq_{hash} 里的 {hash}
 	Head    *HeadInfo // 解析出的头部信息，解析失败则为 nil
 }
 
@@ -79,9 +88,9 @@ type Account struct {
 	Key      string // md5(uid_hash + rand)，即数据库密钥
 }
 
-// Scanner 在根目录下寻找 QQ NT 的消息数据库。
+// Scanner 定位 QQ NT 的消息数据库。
 type Scanner struct {
-	Root   string // 扫描根目录：安卓 root 路径、adb pull 目标、或用户拷贝的目录
+	Root   string // 根路径：Android 根 /、QQ 数据目录、nt_db 目录，或拷贝出来的任意一层
 	DBName string // 要匹配的消息库文件名，默认 nt_msg.db
 }
 
@@ -92,78 +101,160 @@ func (s *Scanner) dbName() string {
 	return s.DBName
 }
 
-// Scan 返回根目录下找到的所有消息数据库。
-func (s *Scanner) Scan() ([]DBInfo, error) {
+// ResolveQQDir 把任意根路径解析成 QQ 数据目录（含 databases/nt_db 的那一层）。
+//
+// 只按已知布局拼路径并检查存在性，不遍历磁盘。根路径可以是：
+//   - Android 根 / 或 /data：会自动补上 data/user/0/com.tencent.mobileqq
+//   - QQ 数据目录本身：/data/user/0/com.tencent.mobileqq
+//   - nt_db 目录本身：.../databases/nt_db
+//   - adb pull 出来的目录，只要里面含有上述任一层
+func ResolveQQDir(root string) (string, bool) {
+	root = filepath.Clean(root)
+	candidates := []string{root}
+	for _, rel := range []string{
+		"data/user/0/" + pkgName,
+		"data/user/10/" + pkgName,
+		"data/data/" + pkgName,
+		pkgName,
+	} {
+		candidates = append(candidates, filepath.Join(root, filepath.FromSlash(rel)))
+	}
+	base := filepath.Base(root)
+	switch {
+	case base == ntDBSubdir:
+		// .../{qqDir}/databases/nt_db
+		candidates = append(candidates, filepath.Dir(filepath.Dir(root)))
+	case strings.HasPrefix(base, ntDBPrefix):
+		// .../{qqDir}/databases/nt_db/nt_qq_{hash}
+		candidates = append(candidates, filepath.Dir(filepath.Dir(filepath.Dir(root))))
+	}
+
+	for _, c := range candidates {
+		if isDir(filepath.Join(c, databasesEl, ntDBSubdir)) {
+			return c, true
+		}
+	}
+	return "", false
+}
+
+// NtDBDir 返回 QQ 数据目录下的账号库目录 databases/nt_db。
+func NtDBDir(qqDir string) string {
+	if filepath.Base(qqDir) == ntDBSubdir {
+		return qqDir
+	}
+	return filepath.Join(qqDir, databasesEl, ntDBSubdir)
+}
+
+// FindDBs 列出 QQ 数据目录下所有账号的消息库：
+// {qqDir}/databases/nt_db/nt_qq_{hash}/nt_msg.db。
+//
+// 只读取 nt_db 这一层目录，不递归。
+func (s *Scanner) FindDBs(qqDir string) []DBInfo {
 	name := s.dbName()
+	entries, err := os.ReadDir(NtDBDir(qqDir))
+	if err != nil {
+		return nil
+	}
 	var out []DBInfo
-	err := filepath.WalkDir(s.Root, func(path string, d os.DirEntry, err error) error {
-		if err != nil {
-			return err
+	for _, e := range entries {
+		if !e.IsDir() || !strings.HasPrefix(e.Name(), ntDBPrefix) {
+			continue
 		}
-		if d.IsDir() || d.Name() != name {
-			return nil
+		p := filepath.Join(NtDBDir(qqDir), e.Name(), name)
+		if !isFile(p) {
+			continue
 		}
-		info := DBInfo{Path: path, Account: accountFromPath(path)}
-		if hi, herr := ParseHead(path); herr == nil {
+		info := DBInfo{
+			Path:    p,
+			Account: strings.TrimPrefix(e.Name(), ntDBPrefix),
+		}
+		if hi, herr := ParseHead(p); herr == nil {
 			info.Head = hi
 		}
 		out = append(out, info)
-		return nil
-	})
-	return out, err
+	}
+	return out
 }
 
-// Accounts 扫描根目录下的 QQ 账号，返回带 uid、数据库路径和密钥的完整记录。
+// Scan 列出根路径下所有 QQ NT 消息库。它解析根目录后只读 nt_db 一层，
+// 不做任何递归遍历。
+func (s *Scanner) Scan() ([]DBInfo, error) {
+	qqDir, ok := ResolveQQDir(s.Root)
+	if !ok {
+		return nil, fmt.Errorf("account: %s 下没有 QQ NT 数据目录（期望 .../%s/%s/%s*/）",
+			s.Root, pkgName, databasesEl, ntDBSubdir)
+	}
+	return s.FindDBs(qqDir), nil
+}
+
+// Accounts 返回根路径下的 QQ 账号，带 uid、数据库路径和密钥。
 //
-// 它优先走结构化的 uid 目录（files/uid/{uin}###{uid}）；找不到时退化为
-// 直接扫 nt_msg.db，此时记录里没有 uid，Key 为空，需要调用方另行提供。
+// uid 来自 {qqDir}/files/uid/{uin}###{uid}。账号与库的配对优先按路径哈希
+// md5(md5(uid)+"nt_kernel")；推算不出（或该目录下只有一个库）时也能配对上。
+// 没有 uid 目录时库照样列出（含 rand），只是算不出密钥。
 func (s *Scanner) Accounts() ([]Account, error) {
-	uids, err := s.findUIDDirs()
-	if err != nil {
-		return nil, err
+	qqDir, ok := ResolveQQDir(s.Root)
+	if !ok {
+		return nil, fmt.Errorf("account: %s 下没有 QQ NT 数据目录（期望 .../%s/%s/%s*/）",
+			s.Root, pkgName, databasesEl, ntDBSubdir)
 	}
 
-	byPath := map[string]Account{}
+	dbs := s.FindDBs(qqDir)
+	if len(dbs) == 0 {
+		return nil, fmt.Errorf("account: %s 下没有找到任何 %s", NtDBDir(qqDir), s.dbName())
+	}
+
+	uids := findUIDs(qqDir)
+	user := userOf(qqDir)
+
+	dbByHash := make(map[string]string, len(dbs))
+	for _, d := range dbs {
+		dbByHash[d.Account] = d.Path
+	}
+
 	var out []Account
+	paired := map[string]bool{}
 
 	for _, u := range uids {
 		uidHash := md5Hex(u.uid)
 		pathHash := md5Hex(uidHash + "nt_kernel")
-		dbPath := filepath.Join(u.qqDir, "databases", "nt_db", "nt_qq_"+pathHash, s.dbName())
-
 		a := Account{
-			User:     u.user,
+			User:     user,
 			UIN:      u.uin,
 			UID:      u.uid,
 			UIDHash:  uidHash,
 			PathHash: pathHash,
-			DBPath:   dbPath,
 		}
-		if fi, err := os.Stat(dbPath); err == nil && !fi.IsDir() {
-			if hi, herr := ParseHead(dbPath); herr == nil && hi != nil {
+		if p, ok := dbByHash[pathHash]; ok {
+			a.DBPath = p
+		} else if len(dbs) == 1 {
+			// 推算的哈希对不上但只有一个库：认定就是它，避免漏掉整个账号
+			a.DBPath = dbs[0].Path
+			a.PathHash = dbs[0].Account
+		}
+		if a.DBPath != "" {
+			paired[a.DBPath] = true
+			if hi, herr := ParseHead(a.DBPath); herr == nil && hi != nil {
 				a.Rand = hi.Rand
 				a.HMACAlgo = hi.HMACAlgo
-				a.Key = DeriveKey(u.uid, a.Rand)
+				if a.Rand != "" {
+					a.Key = DeriveKey(u.uid, a.Rand)
+				}
 			}
 		}
 		out = append(out, a)
-		byPath[dbPath] = a
 	}
 
-	// 不在已知账号目录下的孤立库（例如用户只拷出了 nt_msg.db）也要报告，
-	// 这样调用方至少知道有这么个文件，可以另行传入 uid 或 key。
-	dbs, err := s.Scan()
-	if err != nil {
-		return out, nil
-	}
-	for _, db := range dbs {
-		if _, ok := byPath[db.Path]; ok {
+	// 没配上的库（没有 uid 目录，或多账号里哈希推算失败）也要报告出来，
+	// 调用方至少知道有这个文件，可以另行传入 uid 或密钥。
+	for _, d := range dbs {
+		if paired[d.Path] {
 			continue
 		}
-		a := Account{DBPath: db.Path}
-		if db.Head != nil {
-			a.Rand = db.Head.Rand
-			a.HMACAlgo = db.Head.HMACAlgo
+		a := Account{User: user, PathHash: d.Account, DBPath: d.Path}
+		if d.Head != nil {
+			a.Rand = d.Head.Rand
+			a.HMACAlgo = d.Head.HMACAlgo
 		}
 		out = append(out, a)
 	}
@@ -171,55 +262,29 @@ func (s *Scanner) Accounts() ([]Account, error) {
 }
 
 type uidDir struct {
-	user  string
-	uin   string
-	uid   string
-	qqDir string
+	uin string
+	uid string
 }
 
-// qqPkgName 是 QQ 的 Android 包名。
-const qqPkgName = "com.tencent.mobileqq"
-
-// findUIDDirs 找出形如 .../com.tencent.mobileqq/files/uid/{uin}###{uid} 的目录。
-//
-// 这里用遍历而不是 Glob：Glob 的 ** 并不递归，而用户的根目录可以是任意一层
-// （/、/data、/data/data，或者 adb pull 出来的任意目录），深度不确定。
-// 一旦定位到 QQ 的包目录就停下去，不再往里钻，避免扫遍整机。
-func (s *Scanner) findUIDDirs() ([]uidDir, error) {
+// findUIDs 读取 {qqDir}/files/uid 下的 {uin}###{uid} 目录。
+// 只读这一层，不递归。没有该目录时返回空。
+func findUIDs(qqDir string) []uidDir {
+	entries, err := os.ReadDir(filepath.Join(qqDir, uidDirEl, uidSubEl))
+	if err != nil {
+		return nil
+	}
 	var out []uidDir
-
-	handle := func(qqDir string) {
-		entries, err := os.ReadDir(filepath.Join(qqDir, "files", "uid"))
-		if err != nil {
-			return
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
 		}
-		for _, e := range entries {
-			uin, uid, ok := splitUIDName(e.Name())
-			if !ok {
-				continue
-			}
-			out = append(out, uidDir{user: userOf(qqDir), uin: uin, uid: uid, qqDir: qqDir})
+		uin, uid, ok := splitUIDName(e.Name())
+		if !ok {
+			continue
 		}
+		out = append(out, uidDir{uin: uin, uid: uid})
 	}
-
-	// 用户可能直接把根目录指到 QQ 的包目录上
-	if filepath.Base(s.Root) == qqPkgName {
-		handle(s.Root)
-	}
-
-	err := filepath.WalkDir(s.Root, func(path string, d os.DirEntry, err error) error {
-		if err != nil || !d.IsDir() {
-			return nil // 权限不足或不是目录，跳过继续扫
-		}
-		if d.Name() != qqPkgName {
-			return nil
-		}
-		if path != s.Root {
-			handle(path)
-		}
-		return filepath.SkipDir
-	})
-	return out, err
+	return out
 }
 
 // splitUIDName 解析 "{uin}###{uid}" 形式的目录名。
@@ -245,20 +310,14 @@ func userOf(qqDir string) string {
 	return filepath.Base(parent)
 }
 
-// accountFromPath 从路径里提取 nt_qq_{hash} 或 u_ 开头的账号标识。
-func accountFromPath(path string) string {
-	parts := strings.Split(filepath.ToSlash(path), "/")
-	for _, p := range parts {
-		if strings.HasPrefix(p, "nt_qq_") && len(p) > len("nt_qq_") {
-			return strings.TrimPrefix(p, "nt_qq_")
-		}
-	}
-	for _, p := range parts {
-		if strings.HasPrefix(p, "u_") {
-			return p
-		}
-	}
-	return ""
+func isDir(p string) bool {
+	fi, err := os.Stat(p)
+	return err == nil && fi.IsDir()
+}
+
+func isFile(p string) bool {
+	fi, err := os.Stat(p)
+	return err == nil && !fi.IsDir()
 }
 
 var qqntMarker = []byte("QQ_NT DB")

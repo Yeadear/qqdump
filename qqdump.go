@@ -10,7 +10,7 @@
 //
 // 完整链路是四步，每一步都可以单独使用：
 //
-//  1. account：扫描 QQ 数据目录定位 nt_msg.db，从 1024 字节头读出 rand
+//  1. account：按固定布局定位 nt_msg.db，从 1024 字节头读出 rand
 //  2. cipher：剥掉自定义头，用 md5(md5(uid)+rand) 解密 SQLCipher
 //  3. db + msgproto：读出原始行，把 40800 的 Protobuf 解析成消息段
 //  4. export：渲染成 JSON / Markdown / HTML
@@ -229,10 +229,11 @@ func WritePlain(src, dst, key string) error {
 	return cipher.DecryptNTQQFile(src, dst, key)
 }
 
-// Accounts 扫描一个 QQ 数据根目录，返回找到的账号及其密钥。
+// Accounts 定位一个 QQ 数据目录下的账号，返回它们及其密钥。
 //
-// 根目录可以是手机上的 /data/data/com.tencent.mobileqq、adb pull 出来的
-// 目录，或用户自己拷贝出来的任意一层目录。
+// nt_msg.db 的路径是固定的（.../databases/nt_db/nt_qq_{hash}/nt_msg.db），
+// 所以这里按布局拼路径、不遍历磁盘：根路径给 /、/data、QQ 数据目录、
+// nt_db 目录或 nt_qq_{hash} 目录都能直接命中，耗时与设备上文件多少无关。
 func Accounts(root string) ([]account.Account, error) {
 	s := &account.Scanner{Root: root}
 	return s.Accounts()

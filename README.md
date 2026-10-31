@@ -93,8 +93,8 @@ qqdump keys -r /data/data/com.tencent.mobileqq
 ### 2. 导出
 
 ```bash
-# 完整数据目录（root 直取 / adb pull 出来的都行）：自动扫描、算密钥、导出
-qqdump export -r /data/data/com.tencent.mobileqq -o ./backup
+# 完整数据目录（root 直取 / adb pull 出来的都行）：定位账号、算密钥、导出
+qqdump export -r /data/user/0/com.tencent.mobileqq -o ./backup
 
 # 只有一个库文件，手上有密钥
 qqdump export -i nt_msg.db -k b0cbdf4a02d1cc4995f467abe47b94d8 -o ./out
@@ -166,7 +166,7 @@ export.WriteJSON(f, convs, "nt_msg.db")
 
 | 包 | 职责 |
 |---|---|
-| `account` | 扫描数据目录定位 `nt_msg.db`、解析 1024 字节头、派生密钥 |
+| `account` | 按固定布局定位 `nt_msg.db`、解析 1024 字节头、派生密钥 |
 | `cipher` | 剥头 + SQLCipher 解密 |
 | `db` | 读明文库（动态探测列名，兼容不同 QQ 版本） |
 | `msgproto` | 40800 消息体 Protobuf → 消息段 |

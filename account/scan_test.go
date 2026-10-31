@@ -169,29 +169,114 @@ func TestAccounts(t *testing.T) {
 	}
 }
 
-// 只拿到孤立的 nt_msg.db（没有 uid 目录）时也要报告出来，
-// 这样调用方至少知道有这个文件，可以另行提供 uid 或密钥。
-func TestScanOrphanDB(t *testing.T) {
+// 没有 files/uid（拿不到 uid）时，库照样要列出来，只是算不出密钥。
+// 调用方可以据此另行传入 uid 或密钥。
+func TestAccountWithoutUIDDir(t *testing.T) {
 	root := t.TempDir()
-	dbPath := filepath.Join(root, "somewhere", DefaultDBName)
-	if err := os.MkdirAll(filepath.Dir(dbPath), 0o755); err != nil {
+	qqDir := filepath.Join(root, pkgName)
+	dbDir := filepath.Join(qqDir, databasesEl, ntDBSubdir, ntDBPrefix+"15f44a365337b095c1025182df6a2f3f")
+	if err := os.MkdirAll(dbDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	dbPath := filepath.Join(dbDir, DefaultDBName)
 	head := buildHead("vCsg8neC", "1.1.0.1", "HMAC_SHA1")
 	if err := os.WriteFile(dbPath, append(head, make([]byte, 4096)...), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	s := &Scanner{Root: root}
+	s := &Scanner{Root: qqDir}
 	dbs, err := s.Scan()
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(dbs) != 1 {
-		t.Fatalf("扫到 %d 个库, want 1", len(dbs))
+		t.Fatalf("列出 %d 个库, want 1", len(dbs))
+	}
+	if dbs[0].Account != "15f44a365337b095c1025182df6a2f3f" {
+		t.Errorf("Account = %q，应该是目录名里的哈希", dbs[0].Account)
 	}
 	if dbs[0].Head == nil || dbs[0].Head.Rand != "vCsg8neC" {
 		t.Errorf("头部解析失败：%+v", dbs[0].Head)
+	}
+
+	accounts, err := s.Accounts()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(accounts) != 1 {
+		t.Fatalf("列出 %d 个账号, want 1", len(accounts))
+	}
+	if accounts[0].Rand != "vCsg8neC" {
+		t.Errorf("Rand = %q, want vCsg8neC", accounts[0].Rand)
+	}
+	if accounts[0].Key != "" {
+		t.Errorf("没有 uid 时不该算出密钥，got %q", accounts[0].Key)
+	}
+}
+
+// 定位只按固定布局拼路径，不遍历磁盘：放在别处的 nt_msg.db 不该被找到，
+// 否则扫大目录（甚至 /）会因为全盘遍历而慢到像卡死。
+func TestScanDoesNotWalkDisk(t *testing.T) {
+	root := t.TempDir()
+	qqDir := filepath.Join(root, pkgName)
+	ntDB := filepath.Join(qqDir, databasesEl, ntDBSubdir, ntDBPrefix+"aaaa")
+	if err := os.MkdirAll(ntDB, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	head := buildHead("vCsg8neC", "1.1.0.1", "HMAC_SHA1")
+	real := filepath.Join(ntDB, DefaultDBName)
+	if err := os.WriteFile(real, append(head, make([]byte, 4096)...), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// 陷阱：根目录下任意位置再放一个，不该被计入
+	trap := filepath.Join(root, "somewhere", "deep", DefaultDBName)
+	if err := os.MkdirAll(filepath.Dir(trap), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(trap, append(head, make([]byte, 4096)...), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	dbs, err := (&Scanner{Root: root}).Scan()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(dbs) != 1 {
+		t.Fatalf("列出 %d 个库, want 1（只认 nt_db 下的）", len(dbs))
+	}
+	if dbs[0].Path != real {
+		t.Errorf("Path = %q, want %q", dbs[0].Path, real)
+	}
+}
+
+// 根路径可以是任意一层：Android 根、QQ 数据目录、nt_db 目录本身。
+func TestResolveQQDir(t *testing.T) {
+	root := t.TempDir()
+	qqDir := filepath.Join(root, "data", "user", "0", pkgName)
+	ntDB := filepath.Join(qqDir, databasesEl, ntDBSubdir)
+	if err := os.MkdirAll(ntDB, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cases := map[string]string{
+		root:  qqDir, // Android 根：自动补 data/user/0
+		qqDir: qqDir, // 直接指到 QQ 数据目录
+		ntDB:  qqDir, // 直接指到 nt_db
+	}
+	for in, want := range cases {
+		got, ok := ResolveQQDir(in)
+		if !ok {
+			t.Errorf("ResolveQQDir(%q) 未命中", in)
+			continue
+		}
+		if got != want {
+			t.Errorf("ResolveQQDir(%q) = %q, want %q", in, got, want)
+		}
+	}
+
+	if _, ok := ResolveQQDir(filepath.Join(root, "nope")); ok {
+		t.Error("没有 QQ 数据目录时不该命中")
 	}
 }
 

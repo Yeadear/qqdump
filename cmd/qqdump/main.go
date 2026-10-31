@@ -2,12 +2,14 @@
 //
 // 三个主命令：
 //
-//	qqdump keys     扫描 QQ 数据目录，算出每个账号的数据库密钥
+//	qqdump keys     定位 QQ 数据目录下的账号库，算出数据库密钥
 //	qqdump decrypt  把加密的 nt_msg.db 解成明文 SQLite
 //	qqdump export   解密并导出为 JSON / Markdown / HTML
 //
 // 数据可以是安卓 root 直接读到的路径、adb pull 出来的目录，或者用户自己
-// 拷贝出来的任意一层目录——三者的目录布局是一样的，所以共用一套扫描逻辑。
+// 拷贝出来的任意一层目录——三者的目录布局是一样的。nt_msg.db 的路径是固定的
+// （.../databases/nt_db/nt_qq_{hash}/nt_msg.db），所以定位按固定布局拼路径，
+// 不遍历磁盘。
 package main
 
 import (
@@ -31,10 +33,13 @@ const usageText = `qqdump — 安卓 QQ(NT) 聊天记录导出器
 
 用法:
   qqdump info    -i <nt_msg.db>                        查看数据库头部（rand / HMAC 算法）
-  qqdump keys    -r <QQ数据根目录>                      扫描账号并算出密钥
+  qqdump keys    -r <QQ数据目录>                        列出账号库并算出密钥
   qqdump decrypt -i <nt_msg.db> -k <密钥> -o <明文.db>  只解密，不做导出
   qqdump export  -i <nt_msg.db> -k <密钥> -o <输出目录>  解密并导出聊天记录
-  qqdump export  -r <QQ数据根目录> -o <输出目录>         自动扫描、算密钥、导出全部账号
+  qqdump export  -r <QQ数据目录> -o <输出目录>           定位账号、算密钥、导出全部账号
+
+  -r 可以是任意一层：/、/data、/data/user/0/com.tencent.mobileqq、
+  .../databases/nt_db、.../nt_qq_{hash}，按固定布局解析，不扫描磁盘。
 
 密钥（二选一，export/decrypt 必填其一）:
   -k <hex>   直接给出 32 位 hex 数据库密钥
@@ -101,12 +106,12 @@ func main() {
 
 func cmdKeys(args []string) error {
 	fs := flag.NewFlagSet("keys", flag.ContinueOnError)
-	root := fs.String("r", "", "QQ 数据根目录")
+	root := fs.String("r", "", "QQ 数据目录（/、QQ 数据目录、nt_db、nt_qq_xxx 均可）")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if *root == "" {
-		return fmt.Errorf("keys: 需要 -r <QQ数据根目录>")
+		return fmt.Errorf("keys: 需要 -r <QQ数据目录>")
 	}
 
 	accounts, err := qqdump.Accounts(*root)
@@ -115,6 +120,22 @@ func cmdKeys(args []string) error {
 	}
 	if len(accounts) == 0 {
 		return fmt.Errorf("keys: 在 %s 下没有找到 QQ NT 的数据库或账号目录", *root)
+	}
+
+	// 没有 uid 就算不出密钥，把怎么拿 uid 直接讲清楚，省得用户去猜。
+	missing := 0
+	for _, a := range accounts {
+		if a.Key == "" {
+			missing++
+		}
+	}
+	if missing > 0 {
+		fmt.Fprintf(os.Stderr,
+			"提示：%d 个账号没有密钥（找不到 %s），需要 uid 才能算出密钥。\n"+
+				"uid 在数据目录的 files/uid/{QQ号}###{uid} 下：\n"+
+				"  adb shell ls /data/user/0/com.tencent.mobileqq/files/uid/\n"+
+				"拿到 uid 后：qqdump export -i <nt_msg.db> -u <uid> -o <输出目录>\n\n",
+			missing, filepath.Join("files", "uid"))
 	}
 
 	type row struct {
@@ -204,7 +225,7 @@ func cmdDecrypt(args []string) error {
 func cmdExport(args []string) error {
 	fs := flag.NewFlagSet("export", flag.ContinueOnError)
 	in := fs.String("i", "", "nt_msg.db 路径")
-	root := fs.String("r", "", "QQ 数据根目录（自动扫描）")
+	root := fs.String("r", "", "QQ 数据目录（/、QQ 数据目录、nt_db、nt_qq_xxx 均可）")
 	outDir := fs.String("o", "qqdump-out", "输出目录")
 	formats := fs.String("f", "html,md,json", "输出格式，逗号分隔")
 	key := fs.String("k", "", "32 位 hex 密钥")
