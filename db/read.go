@@ -196,7 +196,29 @@ func fill(vals []any, chatType int) model.Message {
 	if m.SenderName == "" {
 		m.SenderName = m.SenderCard
 	}
+	m.PeerUIN = inferPeerUIN(m, chatType)
 	return m
+}
+
+// inferPeerUIN 兜住 40030 为空的行。
+//
+// NTQQ 里部分群系统消息（如 5/4 成员变动）不写 40030，只把群号放在 40021
+// 与 40027 里；直接取 40030 会得到 0，让这条消息流进一个不存在的"0 号会话"。
+// 群表优先用 40021（值就是群号字符串），其次 40027；私聊表用 40021 或发送者。
+func inferPeerUIN(m model.Message, chatType int) int64 {
+	if m.PeerUIN != 0 {
+		return m.PeerUIN
+	}
+	if n := toInt64(m.PeerUID); n > 0 {
+		return n
+	}
+	if m.SessionID > 0 {
+		return m.SessionID
+	}
+	if chatType != 2 && m.SenderUIN > 0 {
+		return m.SenderUIN
+	}
+	return 0
 }
 
 // parseSegments 解析 40800 消息体。解析失败时 msgproto 会保留原始字节，
