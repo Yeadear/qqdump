@@ -344,18 +344,15 @@ func DumpStream(src string, opt Options, h StreamHandler) error {
 		// 单遍扇出：一次遍历把这张表里所有会话的消息分别写出去。
 		// 早先是"每个会话各扫一遍全表"，6.6GB 的库有 200+ 会话时，
 		// 相当于把 1.6TB 的密文解密一遍，慢到不可用。
-		metas := make(map[int64]model.Conversation, len(sessions))
 		sinks := make([]*db.FanoutSink, 0, len(sessions))
 		for _, ss := range sessions {
-			meta := model.Conversation{
+			m := model.Conversation{
 				ID:      ss.ID,
 				PeerUIN: ss.PeerUIN,
 				PeerUID: ss.PeerUID,
 				Type:    kind,
 				Name:    inferNameFromSession(ss, kind),
 			}
-			m := meta
-			metas[ss.PeerUIN] = m
 			sinks = append(sinks, &db.FanoutSink{
 				Peer: ss.PeerUIN,
 				Conversation: func() error {
