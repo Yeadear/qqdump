@@ -16,11 +16,15 @@ func TestZZDumpRows(t *testing.T) {
 	if src == "" {
 		t.Skip("no db")
 	}
+	uid := os.Getenv("QQDUMP_UID")
+	if uid == "" {
+		t.Fatal("需要 QQDUMP_UID")
+	}
 	head, err := account.ParseHead(src)
 	if err != nil {
 		t.Fatal(err)
 	}
-	key := account.DeriveKey(os.Getenv("QQDUMP_UID"), head.Rand)
+	key := account.DeriveKey(uid, head.Rand)
 	s, err := OpenEncryptedStream(src, key, true)
 	if err != nil {
 		t.Fatal(err)
