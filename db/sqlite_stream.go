@@ -261,6 +261,121 @@ func (s *StreamDB) StreamSessionMessagesWindow(table string, peer int64, f Filte
 // errStopScan 由回调返回以提前结束遍历（达到 Limit 时）。
 var errStopScan = errors.New("db: 扫描结束")
 
+// FanoutSink 是单遍多会话扇出的接收端：每个会话一个。
+//
+// 一次遍历把整张表的所有会话消息按会话分发出去，避免"每个会话扫一遍全表"
+// ——6.6GB 的库有 200 多个会话时，N+1 次全表扫描要跑几个小时。
+type FanoutSink struct {
+	// Peer 是该 sink 只关心的会话（消息的 40030 等于它）。
+	Peer int64
+	// Conversation 在该会话收到第一条消息时调用一次，用于打开输出文件。
+	Conversation func() error
+	// Message 接收已按时间升序排好的消息。
+	Message func(model.Message) error
+	// Done 在该会话的最后一个窗口刷出后调用一次。
+	Done func(count int) error
+}
+
+// StreamFanout 单遍遍历 table，把消息按 PeerUIN 分发给 sinks 里对应的会话。
+//
+// 内存模型：每个 sink 一个独立的排序窗口（默认 SortWindow 条），窗满即刷出。
+// 因此总内存 ≈ 会话数 × 窗口大小；会话多时用 window 收紧。
+// 找不到对应 sink 的消息直接丢弃（不缓存），所以内存不会随库大小增长。
+func (s *StreamDB) StreamFanout(table string, sinks []*FanoutSink, f Filter, window int) error {
+	ti, ok := s.tables[table]
+	if !ok {
+		return fmt.Errorf("db: 未知表 %s", table)
+	}
+	if window <= 0 {
+		window = SortWindow
+	}
+	if len(sinks) == 0 {
+		return nil
+	}
+
+	type state struct {
+		sink  *FanoutSink
+		buf   []model.Message
+		count int
+		open  bool
+	}
+	// 按 PeerUIN 索引，避免每条消息线性找 sink。
+	byPeer := make(map[int64]*state, len(sinks))
+	for _, sk := range sinks {
+		byPeer[sk.Peer] = &state{sink: sk, buf: make([]model.Message, 0, window)}
+	}
+
+	flush := func(st *state) error {
+		if len(st.buf) == 0 {
+			return nil
+		}
+		sort.SliceStable(st.buf, func(i, j int) bool {
+			if st.buf[i].Timestamp != st.buf[j].Timestamp {
+				return st.buf[i].Timestamp < st.buf[j].Timestamp
+			}
+			return st.buf[i].ID < st.buf[j].ID
+		})
+		if !st.open && st.sink.Conversation != nil {
+			st.open = true
+			if err := st.sink.Conversation(); err != nil {
+				return err
+			}
+		}
+		for _, m := range st.buf {
+			if st.sink.Message != nil {
+				if err := st.sink.Message(m); err != nil {
+					return err
+				}
+			}
+		}
+		st.buf = st.buf[:0]
+		return nil
+	}
+
+	err := s.walkTable(ti.rootpage, func(_ int64, payload []byte) error {
+		cols, err := parseRecord(payload)
+		if err != nil {
+			return nil
+		}
+		vals := mapColumns(ti.cols, cols)
+		m := fill(vals, ti.chatType)
+		// 先按会话筛，再做时间等过滤：不关心的消息连对象都不必造全。
+		st, ok := byPeer[m.PeerUIN]
+		if !ok {
+			return nil
+		}
+		ff := f
+		ff.PeerUIN = m.PeerUIN
+		if !matchFilter(m, ff) {
+			return nil
+		}
+		if f.Limit > 0 && st.count >= f.Limit {
+			return nil
+		}
+		st.count++
+		st.buf = append(st.buf, m)
+		if len(st.buf) >= window {
+			return flush(st)
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	for _, sk := range sinks {
+		st := byPeer[sk.Peer]
+		if err := flush(st); err != nil {
+			return err
+		}
+		if st.count > 0 && st.sink.Done != nil {
+			if err := st.sink.Done(st.count); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 // walkTable 在遇到 errStopScan 时视为正常结束。
 
 // ---- SQLite 文件格式解析 ----

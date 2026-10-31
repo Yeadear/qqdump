@@ -341,46 +341,59 @@ func DumpStream(src string, opt Options, h StreamHandler) error {
 		}
 		sort.SliceStable(sessions, func(i, j int) bool { return sessions[i].PeerUIN < sessions[j].PeerUIN })
 
-		for _, s := range sessions {
+		// 单遍扇出：一次遍历把这张表里所有会话的消息分别写出去。
+		// 早先是"每个会话各扫一遍全表"，6.6GB 的库有 200+ 会话时，
+		// 相当于把 1.6TB 的密文解密一遍，慢到不可用。
+		metas := make(map[int64]model.Conversation, len(sessions))
+		sinks := make([]*db.FanoutSink, 0, len(sessions))
+		for _, ss := range sessions {
 			meta := model.Conversation{
-				ID:      s.ID,
-				PeerUIN: s.PeerUIN,
-				PeerUID: s.PeerUID,
+				ID:      ss.ID,
+				PeerUIN: ss.PeerUIN,
+				PeerUID: ss.PeerUID,
 				Type:    kind,
-				Name:    inferNameFromSession(s, kind),
+				Name:    inferNameFromSession(ss, kind),
 			}
-			if h.Conversation != nil {
-				if err := h.Conversation(meta); err != nil {
-					return err
-				}
-			}
-
-			count := 0
-			ferr := sdb.StreamSessionMessages(table, s.PeerUIN, db.Filter{
-				Since: opt.Since,
-				Until: opt.Until,
-				Limit: opt.Limit,
-			}, func(m model.Message) error {
-				count++
-				if h.Message != nil {
-					return h.Message(m)
-				}
-				return nil
+			m := meta
+			metas[ss.PeerUIN] = m
+			sinks = append(sinks, &db.FanoutSink{
+				Peer: ss.PeerUIN,
+				Conversation: func() error {
+					if h.Conversation != nil {
+						return h.Conversation(m)
+					}
+					return nil
+				},
+				Message: func(msg model.Message) error {
+					if h.Message != nil {
+						return h.Message(msg)
+					}
+					return nil
+				},
+				Done: func(count int) error {
+					if h.Done != nil {
+						return h.Done(m, count)
+					}
+					return nil
+				},
 			})
-			if ferr != nil {
-				if opt.Tolerant {
-					log.Printf("警告: 会话 %d（表 %s）读取中断（可能受坏页影响），已导出 %d 条: %v",
-						s.PeerUIN, table, count, ferr)
-				} else {
-					return ferr
-				}
-			}
-			if h.Done != nil {
-				if err := h.Done(meta, count); err != nil {
-					return err
-				}
+		}
+
+		ferr := sdb.StreamFanout(table, sinks, db.Filter{
+			Since: opt.Since,
+			Until: opt.Until,
+			Limit: opt.Limit,
+		}, 0)
+		if ferr != nil {
+			if opt.Tolerant {
+				log.Printf("警告: 表 %s 读取中断（可能受坏页影响），已导出部分会话: %v", table, ferr)
+			} else {
+				return ferr
 			}
 		}
+	}
+	if n := sdb.Skipped(); n > 0 {
+		log.Printf("提示: 有 %d 条记录因源库坏页/结构异常未能读取（其余已正常导出）", n)
 	}
 	return nil
 }

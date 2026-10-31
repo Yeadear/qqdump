@@ -403,3 +403,69 @@ func TestWalkInteriorDropsBadChild(t *testing.T) {
 		t.Fatalf("越界子页应被跳过，实得 %v", got)
 	}
 }
+
+// TestStreamFanout 验证单遍扇出：一次遍历把不同会话的消息分发到各自的 sink，
+// 每个 sink 内部仍按时间升序（物理顺序与时间序故意错开）。
+func TestStreamFanout(t *testing.T) {
+	U := 2048
+	// 物理顺序: peer A(ts30) B(ts10) A(ts10) B(ts30) A(ts20)
+	type row struct {
+		peer int64
+		ts   int64
+	}
+	rows := []row{{1, 30}, {2, 10}, {1, 10}, {2, 30}, {1, 20}}
+	var recs [][]byte
+	for _, r := range rows {
+		// 构造一个 [peer(int4), ts(int4)] 的 record。
+		hdr := []byte{0x03, 0x04, 0x04}
+		var pb [4]byte
+		binary.BigEndian.PutUint32(pb[:], uint32(r.peer))
+		var bb [4]byte
+		binary.BigEndian.PutUint32(bb[:], uint32(r.ts))
+		recs = append(recs, append(append(hdr, pb[:]...), bb[:]...))
+	}
+	fr := &fakeReader{usable: U, pages: map[uint32][]byte{
+		2: buildLeafPage(U, 0, recs),
+	}}
+	s := &StreamDB{dec: fr, usable: U, pages: 2, tables: map[string]tableInfo{
+		TableC2C: {name: TableC2C, rootpage: 2, cols: []string{ColPeerUIN, ColTimestamp}, chatType: model.ChatC2C},
+	}}
+
+	got := map[int64][]int64{}
+	var order []int64
+	var sinks []*FanoutSink
+	for _, p := range []int64{1, 2} {
+		peer := p
+		sinks = append(sinks, &FanoutSink{
+			Peer: peer,
+			Conversation: func() error {
+				order = append(order, peer)
+				return nil
+			},
+			Message: func(m model.Message) error {
+				got[peer] = append(got[peer], m.Timestamp)
+				return nil
+			},
+		})
+	}
+	if err := s.StreamFanout(TableC2C, sinks, Filter{}, 8); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []int64{1, 2} {
+		want := []int64{10, 20, 30}
+		if p == 2 {
+			want = []int64{10, 30}
+		}
+		if len(got[p]) != len(want) {
+			t.Fatalf("peer %d 得到 %v, want %v", p, got[p], want)
+		}
+		for i := range want {
+			if got[p][i] != want[i] {
+				t.Fatalf("peer %d = %v, want %v", p, got[p], want)
+			}
+		}
+	}
+	if len(order) != 2 {
+		t.Fatalf("Conversation 应各调用一次，实得 %v", order)
+	}
+}
