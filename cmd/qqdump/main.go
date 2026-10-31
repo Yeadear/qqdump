@@ -353,6 +353,8 @@ func cmdExport(args []string) error {
 		return fmt.Errorf("export: 创建输出目录失败: %w", err)
 	}
 
+	// 单个账号失败不中断整个导出：记下来，最后汇总，让用户至少拿到其余账号。
+	var failed []exportJob
 	for _, j := range jobs {
 		dir := outDir()
 		if len(jobs) > 1 && j.label != "" {
@@ -373,7 +375,9 @@ func cmdExport(args []string) error {
 		log.Printf("解密并读取 %s", j.db)
 		convs, err := qqdump.Dump(j.db, opt)
 		if err != nil {
-			return err
+			log.Printf("跳过 %s：%v", j.db, err)
+			failed = append(failed, j)
+			continue
 		}
 		total := 0
 		for _, c := range convs {
@@ -382,11 +386,26 @@ func cmdExport(args []string) error {
 		log.Printf("共 %d 个会话 / %d 条消息", len(convs), total)
 
 		if err := writeOutputs(dir, convs, j.db, wantFormats); err != nil {
-			return err
+			log.Printf("跳过 %s：写出失败 %v", j.db, err)
+			failed = append(failed, j)
+			continue
 		}
 		log.Printf("已导出到 %s", dir)
 	}
+
+	if len(failed) > 0 {
+		return fmt.Errorf("export: %d/%d 个账号导出失败（其余已正常导出，见上方日志）：%s",
+			len(failed), len(jobs), firstFailed(failed))
+	}
 	return nil
+}
+
+// firstFailed 取第一个失败账号的库路径，便于在汇总错误里直接看到。
+func firstFailed(js []exportJob) string {
+	if len(js) == 0 {
+		return ""
+	}
+	return js[0].db
 }
 
 // ---- 共用 ----
