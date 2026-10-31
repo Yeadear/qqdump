@@ -361,6 +361,10 @@ func (s *StreamDB) walkInterior(content []byte, hdr int, q *[]uint32, cb func(in
 }
 
 // localPayload 取出一条 record 的完整 payload，处理 overflow 链。
+//
+// SQLite 对 table b-tree 的 leaf cell 用 minLocal=(U-12)*32/255-23 计算本地
+// 存放量；index b-tree 用的是 64/255 系数。nt_msg.db 的 master 表行（建表
+// SQL 文本）就可能超过本地容量，必须走 overflow 链才能完整取回。
 func (s *StreamDB) localPayload(cellBody []byte, plen int) ([]byte, error) {
 	U := s.usable
 	maxLocal := U - 35
@@ -371,9 +375,13 @@ func (s *StreamDB) localPayload(cellBody []byte, plen int) ([]byte, error) {
 		}
 		return cellBody[:plen], nil
 	}
-	local := minLocal + ((plen - minLocal) % (U - 4))
+	// 本地存放的部分必须留下 4 字节存 overflow 首页号。
+	local := minLocal + (plen-minLocal)%(U-4)
+	if local > plen {
+		local = plen
+	}
 	if len(cellBody) < local+4 {
-		return nil, fmt.Errorf("db: overflow 头越界")
+		return nil, fmt.Errorf("db: overflow 头越界（需要 %d，cell 只有 %d）", local+4, len(cellBody))
 	}
 	overflowStart := binary.BigEndian.Uint32(cellBody[local : local+4])
 	out := make([]byte, 0, plen)

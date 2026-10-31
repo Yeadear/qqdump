@@ -220,3 +220,57 @@ func TestStreamSortWindow(t *testing.T) {
 		}
 	}
 }
+
+// TestLocalPayloadOverflow 验证超过本地容量的 payload 能顺着 overflow 链拼回。
+// 这是 sqlite_master 里建表 SQL 的实际形态（NTQQ 的建表语句很长）。
+func TestLocalPayloadOverflow(t *testing.T) {
+	U := 512
+	s := &StreamDB{usable: U}
+
+	maxLocal := U - 35
+	minLocal := (U-12)*32/255 - 23
+	// 故意造一个必须走 overflow 的 payload
+	plen := maxLocal*2 + 100
+	orig := make([]byte, plen)
+	for i := range orig {
+		orig[i] = byte(i % 251)
+	}
+	local := minLocal + (plen-minLocal)%(U-4)
+	if local >= plen {
+		t.Fatalf("测试构造有误：local=%d plen=%d", local, plen)
+	}
+
+	// 把 payload 切成 local + 若干 overflow 页
+	rest := orig[local:]
+	cellBody := append([]byte(nil), orig[:local]...)
+
+	pages := map[uint32][]byte{}
+	var pgno uint32 = 10
+	first := pgno
+	for len(rest) > 0 {
+		page := make([]byte, U)
+		n := U - 4
+		if len(rest) < n {
+			n = len(rest)
+		}
+		if len(rest) > n {
+			binary.BigEndian.PutUint32(page[0:4], pgno+1)
+		}
+		copy(page[4:], rest[:n])
+		pages[pgno] = page
+		rest = rest[n:]
+		pgno++
+	}
+	var pb [4]byte
+	binary.BigEndian.PutUint32(pb[:], first)
+	cellBody = append(cellBody, pb[:]...)
+
+	s.dec = &fakeReader{pages: pages, usable: U}
+	got, err := s.localPayload(cellBody, plen)
+	if err != nil {
+		t.Fatalf("localPayload: %v", err)
+	}
+	if !bytes.Equal(got, orig) {
+		t.Fatalf("overflow 拼接结果不一致：got %d 字节, want %d", len(got), len(orig))
+	}
+}
