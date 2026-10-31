@@ -7,7 +7,6 @@ import (
 	"testing"
 
 	"github.com/Yeadear/qqdump/account"
-	"github.com/Yeadear/qqdump/model"
 )
 
 // TestZZDumpRows 打印整表所有行的原始字段，用于核对"被过滤的行"到底是什么。
@@ -30,7 +29,7 @@ func TestZZDumpRows(t *testing.T) {
 	for _, tb := range s.Tables() {
 		n, skipped, ph := 0, 0, 0
 		var samples []string
-		err := s.walkTable(s.tables[tb].rootpage, func(_ int64, payload []byte) error {
+		werr := s.walkTable(s.tables[tb].rootpage, func(_ int64, payload []byte) error {
 			n++
 			cols, e := parseRecord(payload)
 			if e != nil {
@@ -51,6 +50,9 @@ func TestZZDumpRows(t *testing.T) {
 			return nil
 		})
 		_ = skipped
+		if werr != nil {
+			fmt.Println("walk err", werr)
+		}
 		fmt.Printf("表 %s: 共 %d 行, 占位 %d\n", tb, n, ph)
 		for _, s := range samples {
 			fmt.Println("  ", s)
