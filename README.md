@@ -72,7 +72,7 @@ adb shell ls /data/data/com.tencent.mobileqq/files/uid/
 
 ```bash
 # 扫整个 QQ 数据目录，直接算出每个账号的密钥
-qqdump keys -r /data/data/com.tencent.mobileqq
+qqdump keys -d /data/data/com.tencent.mobileqq
 ```
 
 输出：
@@ -94,7 +94,7 @@ qqdump keys -r /data/data/com.tencent.mobileqq
 
 ```bash
 # 完整数据目录（root 直取 / adb pull 出来的都行）：定位账号、算密钥、导出
-qqdump export -r /data/user/0/com.tencent.mobileqq -o ./backup
+qqdump export -o ./backup   # 默认就是 /data/user/0/com.tencent.mobileqq
 
 # 只有一个库文件，手上有密钥
 qqdump export -i nt_msg.db -k b0cbdf4a02d1cc4995f467abe47b94d8 -o ./out

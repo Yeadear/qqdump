@@ -6,10 +6,11 @@
 //	qqdump decrypt  把加密的 nt_msg.db 解成明文 SQLite
 //	qqdump export   解密并导出为 JSON / Markdown / HTML
 //
-// 数据可以是安卓 root 直接读到的路径、adb pull 出来的目录，或者用户自己
-// 拷贝出来的任意一层目录——三者的目录布局是一样的。nt_msg.db 的路径是固定的
-// （.../databases/nt_db/nt_qq_{hash}/nt_msg.db），所以定位按固定布局拼路径，
-// 不遍历磁盘。
+// 数据目录用 -d/--data 指定，默认是安卓上的固定位置
+// /data/user/0/com.tencent.mobileqq。nt_msg.db 的路径也是固定的
+// （.../databases/nt_db/nt_qq_{hash}/nt_msg.db），所以定位按布局拼路径、
+// 只读 nt_db 和 files/uid 这两层目录，不遍历磁盘：给一个目录就能自动找出
+// 全部账号、算出各自密钥、解密导出，不需要手工填 uid。
 package main
 
 import (
@@ -32,32 +33,35 @@ import (
 const usageText = `qqdump — 安卓 QQ(NT) 聊天记录导出器
 
 用法:
-  qqdump info    -i <nt_msg.db>                        查看数据库头部（rand / HMAC 算法）
-  qqdump keys    -r <QQ数据目录>                        列出账号库并算出密钥
-  qqdump decrypt -i <nt_msg.db> -k <密钥> -o <明文.db>  只解密，不做导出
-  qqdump export  -i <nt_msg.db> -k <密钥> -o <输出目录>  解密并导出聊天记录
-  qqdump export  -r <QQ数据目录> -o <输出目录>           定位账号、算密钥、导出全部账号
+  qqdump keys    [--data <QQ数据目录>]                    列出账号并算出密钥
+  qqdump info    --input <nt_msg.db>                      查看库头（rand / HMAC 算法）
+  qqdump decrypt --input <nt_msg.db> --key <密钥> --output <明文.db>
+  qqdump export  [--data <QQ数据目录>] [--output <目录>]    自动找账号、算密钥、导出全部
 
-  -r 可以是任意一层：/、/data、/data/user/0/com.tencent.mobileqq、
-  .../databases/nt_db、.../nt_qq_{hash}，按固定布局解析，不扫描磁盘。
+全局参数:
+  -d, --data <dir>  QQ 数据目录，默认 /data/user/0/com.tencent.mobileqq
 
-密钥（二选一，export/decrypt 必填其一）:
-  -k <hex>   直接给出 32 位 hex 数据库密钥
-  -u <uid>   给出账号的 NT UID，由库头的 rand 自动派生密钥
+密钥（export/decrypt 单库时二选一；用 --data 时自动算，不需要填）:
+  -k, --key <hex>  直接给出 32 位 hex 数据库密钥
+  -u, --uid <uid>  给出账号的 NT UID，由库头的 rand 自动派生密钥
 
 export 选项:
-  -o <dir>      输出目录（默认 ./qqdump-out）
-  -f <格式>     输出格式，逗号分隔：json,html,md（默认 html,md,json）
-  -a <QQ号>     按 QQ 号筛选账号（-r 模式）
-  -kind <类型>  只导出 c2c 或 group
-  -since <时间> 起始时间，2006-01-02 或 Unix 秒
-  -until <时间> 结束时间，同上
-  -n <条数>     每个会话最多导出多少条（0 为不限）
-  -keep         保留解密出的明文库
+  -i, --input <file>  只导出这一个 nt_msg.db
+  -o, --output <dir>  输出目录（默认 ./qqdump-out）
+  -f, --format <列表> 输出格式，逗号分隔：json,html,md（默认 html,md,json）
+  -a, --account <QQ号> 只导出该 QQ 号
+  --kind <类型>       只导出 c2c 或 group
+  --since <时间>      起始时间，2006-01-02 或 Unix 秒
+  --until <时间>      结束时间，同上
+  -n, --limit <条数>  每个会话最多导出多少条（0 为不限）
+  --keep              保留解密出的明文库
 
 例子:
-  # 手机上 root 后直接扫，导出全部会话
-  qqdump export -r /data/data/com.tencent.mobileqq -o ./backup
+  # 手机上 root 后直接跑，自动找全部账号并导出
+  qqdump export -o ./backup
+
+  # 指定数据目录（-d 可以放在子命令前后任意位置）
+  qqdump export -d /data/user/0/com.tencent.mobileqq -o ./backup
 
   # 只有一个库文件，手上有密钥
   qqdump export -i nt_msg.db -k 0123456789abcdef0123456789abcdef -o ./out
@@ -68,6 +72,78 @@ export 选项:
 
 // cst 是 UTC+8，中国用户看到的时间才有意义。
 var cst = time.FixedZone("CST", 8*60*60)
+
+// Go 的 flag 只认 -name / --name，-d 这种短名要单独注册。下面三个 helper
+// 同时注册短名和长名，短名优先，这样 -o 和 --output 都能用。
+// short 为空表示该参数只有长名（flag 不接受空名字，得跳过注册）。
+func flagStr(fs *flag.FlagSet, short, long string, def, usage string) func() string {
+	lv := fs.String(long, def, usage)
+	if short == "" {
+		return func() string { return *lv }
+	}
+	sv := fs.String(short, "", "")
+	return func() string {
+		if *sv != "" {
+			return *sv
+		}
+		return *lv
+	}
+}
+
+func flagInt(fs *flag.FlagSet, short, long string, def int, usage string) func() int {
+	lv := fs.Int(long, def, usage)
+	if short == "" {
+		return func() int { return *lv }
+	}
+	sv := fs.Int(short, 0, "")
+	return func() int {
+		if *sv != 0 {
+			return *sv
+		}
+		return *lv
+	}
+}
+
+func flagBool(fs *flag.FlagSet, short, long string, def bool, usage string) func() bool {
+	lv := fs.Bool(long, def, usage)
+	if short == "" {
+		return func() bool { return *lv }
+	}
+	sv := fs.Bool(short, false, "")
+	return func() bool { return *sv || *lv }
+}
+
+// dataDir 取 --data 的值。它是全局参数，允许放在子命令前后任意位置，
+// 所以既看本子命令解析到的，也在整个命令行里找一遍。
+func dataDir(local string) string {
+	if local != "" {
+		return local
+	}
+	args := os.Args[1:]
+	for i, a := range args {
+		switch {
+		case a == "-d" || a == "--data":
+			if i+1 < len(args) {
+				return args[i+1]
+			}
+		case strings.HasPrefix(a, "-d="):
+			return a[len("-d="):]
+		case strings.HasPrefix(a, "--data="):
+			return a[len("--data="):]
+		}
+	}
+	return account.DefaultDataDir
+}
+
+// resolveDataDir 校验并解析 QQ 数据目录。-d 只接受真正的 QQ 数据目录。
+func resolveDataDir(dir string) (string, error) {
+	qqDir, ok := account.ResolveQQDir(dir)
+	if !ok {
+		return "", fmt.Errorf("不是 QQ 数据目录：%s\n-d/--data 只接受 %s（或其等价的 /data/data/com.tencent.mobileqq）",
+			dir, account.DefaultDataDir)
+	}
+	return qqDir, nil
+}
 
 func main() {
 	log.SetFlags(0)
@@ -106,20 +182,22 @@ func main() {
 
 func cmdKeys(args []string) error {
 	fs := flag.NewFlagSet("keys", flag.ContinueOnError)
-	root := fs.String("r", "", "QQ 数据目录（/、QQ 数据目录、nt_db、nt_qq_xxx 均可）")
+	d := flagStr(fs, "d", "data", "", "QQ 数据目录")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if *root == "" {
-		return fmt.Errorf("keys: 需要 -r <QQ数据目录>")
+
+	root, err := resolveDataDir(dataDir(d()))
+	if err != nil {
+		return err
 	}
 
-	accounts, err := qqdump.Accounts(*root)
+	accounts, err := qqdump.Accounts(root)
 	if err != nil {
 		return err
 	}
 	if len(accounts) == 0 {
-		return fmt.Errorf("keys: 在 %s 下没有找到 QQ NT 的数据库或账号目录", *root)
+		return fmt.Errorf("keys: 在 %s 下没有找到 QQ NT 的数据库或账号目录", root)
 	}
 
 	// 没有 uid 就算不出密钥，把怎么拿 uid 直接讲清楚，省得用户去猜。
@@ -130,12 +208,17 @@ func cmdKeys(args []string) error {
 		}
 	}
 	if missing > 0 {
+		// 把读 uid 时到底为什么失败讲清楚，省得用户去猜
+		why := ""
+		if _, uerr := account.UIDInfo(root); uerr != nil {
+			why = "（" + uerr.Error() + "）"
+		}
 		fmt.Fprintf(os.Stderr,
-			"提示：%d 个账号没有密钥（找不到 %s），需要 uid 才能算出密钥。\n"+
-				"uid 在数据目录的 files/uid/{QQ号}###{uid} 下：\n"+
-				"  adb shell ls /data/user/0/com.tencent.mobileqq/files/uid/\n"+
-				"拿到 uid 后：qqdump export -i <nt_msg.db> -u <uid> -o <输出目录>\n\n",
-			missing, filepath.Join("files", "uid"))
+			"提示：%d 个账号没有密钥——没读到 files/uid %s\n"+
+				"uid 目录应当是 %s，形如 {QQ号}###{uid}\n"+
+				"确认一下：adb shell su -c 'ls /data/data/com.tencent.mobileqq/files/uid/'\n"+
+				"也可以只导单个库：qqdump export -i <nt_msg.db> -u <uid> -o <输出目录>\n\n",
+			missing, why, filepath.Join(root, "files", "uid"))
 	}
 
 	type row struct {
@@ -164,21 +247,21 @@ func cmdKeys(args []string) error {
 
 func cmdInfo(args []string) error {
 	fs := flag.NewFlagSet("info", flag.ContinueOnError)
-	in := fs.String("i", "", "nt_msg.db 路径")
+	in := flagStr(fs, "i", "input", "", "nt_msg.db 路径")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if *in == "" {
-		return fmt.Errorf("info: 需要 -i <nt_msg.db>")
+	if in() == "" {
+		return fmt.Errorf("info: 需要 -i/--input <nt_msg.db>")
 	}
-	head, err := qqdump.Head(*in)
+	head, err := qqdump.Head(in())
 	if err != nil {
 		return err
 	}
 	if head == nil {
-		return fmt.Errorf("info: %s 不是 NTQQ 数据库（没有 QQ_NT DB 头标记）", *in)
+		return fmt.Errorf("info: %s 不是 NTQQ 数据库（没有 QQ_NT DB 头标记）", in())
 	}
-	fmt.Printf("文件:      %s\n", *in)
+	fmt.Printf("文件:      %s\n", in())
 	fmt.Printf("rand:      %s\n", head.Rand)
 	fmt.Printf("版本:      %s\n", head.Version)
 	fmt.Printf("HMAC 算法: %s\n", head.HMACAlgo)
@@ -194,29 +277,26 @@ func cmdInfo(args []string) error {
 
 func cmdDecrypt(args []string) error {
 	fs := flag.NewFlagSet("decrypt", flag.ContinueOnError)
-	in := fs.String("i", "", "nt_msg.db 路径")
-	out := fs.String("o", "nt_msg_plain.db", "输出的明文库路径")
-	key := fs.String("k", "", "32 位 hex 密钥")
-	uid := fs.String("u", "", "NT UID（用于派生密钥）")
+	in := flagStr(fs, "i", "input", "", "nt_msg.db 路径")
+	out := flagStr(fs, "o", "output", "nt_msg_plain.db", "输出的明文库路径")
+	key := flagStr(fs, "k", "key", "", "32 位 hex 密钥")
+	uid := flagStr(fs, "u", "uid", "", "NT UID（用于派生密钥）")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if *in == "" {
-		return fmt.Errorf("decrypt: 需要 -i <nt_msg.db>")
-	}
-	if *out == "" {
-		return fmt.Errorf("decrypt: 需要 -o <输出文件>")
+	if in() == "" {
+		return fmt.Errorf("decrypt: 需要 -i/--input <nt_msg.db>")
 	}
 
-	k, err := resolveKey(*in, *key, *uid)
+	k, err := resolveKey(in(), key(), uid())
 	if err != nil {
 		return err
 	}
-	log.Printf("解密 %s → %s", *in, *out)
-	if err := qqdump.WritePlain(*in, *out, k); err != nil {
+	log.Printf("解密 %s → %s", in(), out())
+	if err := qqdump.WritePlain(in(), out(), k); err != nil {
 		return err
 	}
-	log.Printf("完成：%s 可用任意 SQLite 工具直接打开", *out)
+	log.Printf("完成：%s 可用任意 SQLite 工具直接打开", out())
 	return nil
 }
 
@@ -224,59 +304,69 @@ func cmdDecrypt(args []string) error {
 
 func cmdExport(args []string) error {
 	fs := flag.NewFlagSet("export", flag.ContinueOnError)
-	in := fs.String("i", "", "nt_msg.db 路径")
-	root := fs.String("r", "", "QQ 数据目录（/、QQ 数据目录、nt_db、nt_qq_xxx 均可）")
-	outDir := fs.String("o", "qqdump-out", "输出目录")
-	formats := fs.String("f", "html,md,json", "输出格式，逗号分隔")
-	key := fs.String("k", "", "32 位 hex 密钥")
-	uid := fs.String("u", "", "NT UID")
-	only := fs.String("a", "", "只导出该 QQ 号的账号")
-	kinds := fs.String("kind", "", "只导出 c2c 或 group")
-	since := fs.String("since", "", "起始时间")
-	until := fs.String("until", "", "结束时间")
-	limit := fs.Int("n", 0, "每个会话最多条数")
-	keep := fs.Bool("keep", false, "保留明文库")
+	in := flagStr(fs, "i", "input", "", "只导出这一个 nt_msg.db")
+	d := flagStr(fs, "d", "data", "", "QQ 数据目录")
+	outDir := flagStr(fs, "o", "output", "qqdump-out", "输出目录")
+	formats := flagStr(fs, "f", "format", "html,md,json", "输出格式，逗号分隔")
+	key := flagStr(fs, "k", "key", "", "32 位 hex 密钥")
+	uid := flagStr(fs, "u", "uid", "", "NT UID")
+	only := flagStr(fs, "a", "account", "", "只导出该 QQ 号的账号")
+	kinds := flagStr(fs, "", "kind", "", "只导出 c2c 或 group")
+	since := flagStr(fs, "", "since", "", "起始时间")
+	until := flagStr(fs, "", "until", "", "结束时间")
+	limit := flagInt(fs, "n", "limit", 0, "每个会话最多条数")
+	keep := flagBool(fs, "", "keep", false, "保留明文库")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 
-	jobs, err := collectJobs(*in, *root, *key, *uid, *only)
+	// -d 默认就是安卓上的固定位置，所以不带任何参数也能直接跑
+	root := ""
+	if in() == "" {
+		var err error
+		root, err = resolveDataDir(dataDir(d()))
+		if err != nil {
+			return err
+		}
+	}
+
+	jobs, err := collectJobs(in(), root, key(), uid(), only())
 	if err != nil {
 		return err
 	}
 
-	wantFormats := parseFormats(*formats)
+	wantFormats := parseFormats(formats())
 	if len(wantFormats) == 0 {
-		return fmt.Errorf("export: -f 至少要包含 json、html 或 md 之一")
+		return fmt.Errorf("export: -f/--format 至少要包含 json、html 或 md 之一")
 	}
 
-	sinceTS, err := parseTime(*since)
+	sinceTS, err := parseTime(since())
 	if err != nil {
-		return fmt.Errorf("export: -since: %w", err)
+		return fmt.Errorf("export: --since: %w", err)
 	}
-	untilTS, err := parseTime(*until)
+	untilTS, err := parseTime(until())
 	if err != nil {
-		return fmt.Errorf("export: -until: %w", err)
+		return fmt.Errorf("export: --until: %w", err)
 	}
 
-	if err := os.MkdirAll(*outDir, 0o755); err != nil {
+	if err := os.MkdirAll(outDir(), 0o755); err != nil {
 		return fmt.Errorf("export: 创建输出目录失败: %w", err)
 	}
 
 	for _, j := range jobs {
-		dir := *outDir
+		dir := outDir()
 		if len(jobs) > 1 && j.label != "" {
-			dir = filepath.Join(*outDir, sanitize(j.label))
+			dir = filepath.Join(outDir(), sanitize(j.label))
 			if err := os.MkdirAll(dir, 0o755); err != nil {
 				return err
 			}
 		}
 
-		opt := qqdump.Options{Key: j.key, Since: sinceTS, Until: untilTS, Limit: *limit}
-		if *kinds != "" {
-			opt.Kinds = strings.Split(*kinds, ",")
+		opt := qqdump.Options{Key: j.key, Since: sinceTS, Until: untilTS, Limit: limit()}
+		if kinds() != "" {
+			opt.Kinds = strings.Split(kinds(), ",")
 		}
-		if *keep {
+		if keep() {
 			opt.PlainPath = filepath.Join(dir, "nt_msg_plain.db")
 		}
 
@@ -346,7 +436,7 @@ func collectJobs(in, root, key, uid, only string) ([]exportJob, error) {
 		}
 
 	default:
-		return nil, fmt.Errorf("export: 需要 -i <nt_msg.db> 或 -r <QQ数据根目录>")
+		return nil, fmt.Errorf("export: 需要 -i/--input <nt_msg.db> 或 -d/--data <QQ数据目录>")
 	}
 	return jobs, nil
 }

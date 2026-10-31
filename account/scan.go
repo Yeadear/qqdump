@@ -88,10 +88,17 @@ type Account struct {
 	Key      string // md5(uid_hash + rand)，即数据库密钥
 }
 
+// DefaultDataDir 是安卓上 QQ 数据目录的固定位置。
+const DefaultDataDir = "/data/user/0/com.tencent.mobileqq"
+
 // Scanner 定位 QQ NT 的消息数据库。
 type Scanner struct {
-	Root   string // 根路径：Android 根 /、QQ 数据目录、nt_db 目录，或拷贝出来的任意一层
+	Root   string // QQ 数据目录
 	DBName string // 要匹配的消息库文件名，默认 nt_msg.db
+
+	// 诊断用：uid 目录最终从哪读到的、读不到时的原因
+	UIDDir string
+	UIDErr error
 }
 
 func (s *Scanner) dbName() string {
@@ -204,7 +211,8 @@ func (s *Scanner) Accounts() ([]Account, error) {
 		return nil, fmt.Errorf("account: %s 下没有找到任何 %s", NtDBDir(qqDir), s.dbName())
 	}
 
-	uids := findUIDs(qqDir)
+	uids, uidDir, uidErr := findUIDs(qqDir)
+	s.UIDDir, s.UIDErr = uidDir, uidErr
 	user := userOf(qqDir)
 
 	dbByHash := make(map[string]string, len(dbs))
@@ -266,38 +274,67 @@ type uidDir struct {
 	uid string
 }
 
-// findUIDs 读取 {qqDir}/files/uid 下的 {uin}###{uid} 目录。
-// 只读这一层，不递归。没有该目录时返回空。
-func findUIDs(qqDir string) []uidDir {
-	entries, err := os.ReadDir(filepath.Join(qqDir, uidDirEl, uidSubEl))
-	if err != nil {
-		return nil
+// uidDirPaths 是 files/uid 的固定候选位置。
+//
+// 第一个是 QQ 数据目录下的标准位置；另外两个是安卓上的绝对路径——部分设备
+// /data/data 与 /data/user/0 不是同一处，QQ 数据目录在一个下面、uid 目录在
+// 另一个下面，所以两个都试。全是固定路径，不扫描。
+func uidDirPaths(qqDir string) []string {
+	return []string{
+		filepath.Join(qqDir, uidDirEl, uidSubEl),
+		"/data/data/" + pkgName + "/" + uidDirEl + "/" + uidSubEl,
+		"/data/user/0/" + pkgName + "/" + uidDirEl + "/" + uidSubEl,
 	}
-	var out []uidDir
-	for _, e := range entries {
-		if !e.IsDir() {
+}
+
+// findUIDs 读取 files/uid 下的账号目录，返回账号、实际读到的目录与失败原因。
+// 只读这一层，不递归。
+func findUIDs(qqDir string) ([]uidDir, string, error) {
+	var lastErr error
+	for _, dir := range uidDirPaths(qqDir) {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			lastErr = err
 			continue
 		}
-		uin, uid, ok := splitUIDName(e.Name())
-		if !ok {
-			continue
+		var out []uidDir
+		for _, e := range entries {
+			uin, uid, ok := parseUIDEntry(e.Name())
+			if !ok {
+				continue
+			}
+			out = append(out, uidDir{uin: uin, uid: uid})
 		}
-		out = append(out, uidDir{uin: uin, uid: uid})
+		if len(out) > 0 {
+			return out, dir, nil
+		}
+		lastErr = fmt.Errorf("%s 下没有形如 {QQ号}###{uid} 的目录", dir)
 	}
-	return out
+	return nil, "", lastErr
+}
+
+// UIDInfo 返回 uid 目录的实际位置与读取失败原因，供诊断输出使用。
+func UIDInfo(qqDir string) (string, error) {
+	_, dir, err := findUIDs(qqDir)
+	return dir, err
+}
+
+// parseUIDEntry 解析 files/uid 下的目录名。
+// 标准形式是 {uin}###{uid}；少数版本没有 ###，此时 u_ 开头的整串就是 uid。
+func parseUIDEntry(name string) (uin, uid string, ok bool) {
+	if i := strings.Index(name, "###"); i > 0 {
+		uin, uid = name[:i], name[i+3:]
+		return uin, uid, uin != "" && uid != ""
+	}
+	if strings.HasPrefix(name, "u_") {
+		return "", name, true
+	}
+	return "", "", false
 }
 
 // splitUIDName 解析 "{uin}###{uid}" 形式的目录名。
 func splitUIDName(name string) (uin, uid string, ok bool) {
-	i := strings.Index(name, "###")
-	if i <= 0 {
-		return "", "", false
-	}
-	uin, uid = name[:i], name[i+3:]
-	if uin == "" || uid == "" {
-		return "", "", false
-	}
-	return uin, uid, true
+	return parseUIDEntry(name)
 }
 
 // userOf 取出 Android 多用户 ID（.../data/user/{user}/com.tencent.mobileqq）。
